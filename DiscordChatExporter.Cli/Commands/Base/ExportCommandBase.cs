@@ -121,6 +121,14 @@ public abstract class ExportCommandBase : DiscordCommandBase
     }
 
     [CommandOption(
+        "normal",
+        Description = "Normalize the JSON output: entities that have an identity (users, roles, "
+            + "emojis, stickers) are emitted once into lookup tables at the root of the document, "
+            + "and referenced by ID elsewhere. Only valid with '--format json'."
+    )]
+    public bool IsNormalized { get; set; } = false;
+
+    [CommandOption(
         "dateformat",
         Description = "This option doesn't do anything. Kept for backwards compatibility."
     )]
@@ -163,6 +171,12 @@ public abstract class ExportCommandBase : DiscordCommandBase
         if (!string.IsNullOrWhiteSpace(AssetsDirPath) && !ShouldDownloadAssets)
         {
             throw new CommandException("Option --media-dir cannot be used without --media.");
+        }
+
+        // Normalization restructures the JSON schema, so it has no meaning for other formats
+        if (IsNormalized && ExportFormat != ExportFormat.Json)
+        {
+            throw new CommandException("Option --normal can only be used with '--format json'.");
         }
 
         // Make sure the user does not try to export multiple channels into one file.
@@ -285,6 +299,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                         ShouldFormatMarkdown,
                                         ShouldDownloadAssets,
                                         ShouldReuseAssets,
+                                        IsNormalized,
                                         Locale,
                                         IsUtcNormalizationEnabled
                                     );

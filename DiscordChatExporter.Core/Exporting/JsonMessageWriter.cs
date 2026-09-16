@@ -6,6 +6,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Discord.Data.Embeds;
 using DiscordChatExporter.Core.Markdown.Parsing;
@@ -30,6 +31,19 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         }
     );
 
+    private readonly bool _isNormalized = context.Request.IsNormalized;
+
+    // In normalized mode, entities that have an identity are written to lookup tables at the root
+    // of the document instead of being repeated inline at every occurrence. They are collected
+    // while the messages are streamed out and flushed in the postamble, which is also why the
+    // tables are rendered as late as possible: member info is resolved on demand as the export
+    // progresses, so deferring gives every entry the richest data the export ever saw.
+    private readonly Dictionary<Snowflake, User> _users = [];
+    private readonly Dictionary<Snowflake, Role> _roles = [];
+    private readonly Dictionary<Snowflake, Sticker> _stickers = [];
+    private readonly Dictionary<string, Emoji> _emojis = new(StringComparer.Ordinal);
+    private readonly Dictionary<Emoji, string> _emojiKeys = [];
+
     private async ValueTask<string> FormatMarkdownAsync(
         string markdown,
         CancellationToken cancellationToken = default
@@ -37,6 +51,54 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         Context.Request.ShouldFormatMarkdown
             ? await PlainTextMarkdownVisitor.FormatAsync(Context, markdown, cancellationToken)
             : markdown;
+
+    private string RegisterUser(User user)
+    {
+        // Keep the first occurrence; the role list, nickname, color, and avatar of a table entry
+        // are resolved from the context at render time rather than from the instance stored here.
+        _users.TryAdd(user.Id, user);
+        return user.Id.ToString();
+    }
+
+    private string RegisterSticker(Sticker sticker)
+    {
+        _stickers.TryAdd(sticker.Id, sticker);
+        return sticker.Id.ToString();
+    }
+
+    private string RegisterEmoji(Emoji emoji)
+    {
+        // Emoji is a record, so this matches on the full identity (ID, name, animated flag)
+        if (_emojiKeys.TryGetValue(emoji, out var existingKey))
+            return existingKey;
+
+        // Custom emoji are identified by their ID. Standard emoji don't have one, so they are
+        // identified by their name, which for them is the actual character (e.g., 🙂). The two
+        // key spaces cannot overlap, because a snowflake is never a valid emoji character.
+        var baseKey = emoji.Id?.ToString() ?? emoji.Name;
+
+        // A custom emoji can be renamed over its lifetime, while older messages keep referencing
+        // the name it had back then. Those are distinct records, so give them distinct keys
+        // instead of collapsing them and losing one of the names.
+        var key = baseKey;
+        for (var i = 2; _emojis.ContainsKey(key); i++)
+            key = $"{baseKey}~{i}";
+
+        _emojiKeys[emoji] = key;
+        _emojis[key] = emoji;
+
+        return key;
+    }
+
+    private void WriteReferenceArray(string propertyName, IEnumerable<string> references)
+    {
+        _writer.WriteStartArray(propertyName);
+
+        foreach (var reference in references)
+            _writer.WriteStringValue(reference);
+
+        _writer.WriteEndArray();
+    }
 
     private async ValueTask WriteUserAsync(
         User user,
@@ -60,8 +122,25 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
         if (includeRoles)
         {
-            _writer.WritePropertyName("roles");
-            await WriteRolesAsync(Context.GetUserRoles(user.Id), cancellationToken);
+            var roles = Context.GetUserRoles(user.Id);
+
+            if (_isNormalized)
+            {
+                // Role order is significant (descending by position), so it's preserved here
+                WriteReferenceArray(
+                    "roleIds",
+                    roles.Select(r =>
+                    {
+                        _roles.TryAdd(r.Id, r);
+                        return r.Id.ToString();
+                    })
+                );
+            }
+            else
+            {
+                _writer.WritePropertyName("roles");
+                await WriteRolesAsync(roles, cancellationToken);
+            }
         }
 
         _writer.WriteString(
@@ -78,10 +157,15 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
     private async ValueTask WriteEmojiAsync(
         Emoji emoji,
+        string? key = null,
         CancellationToken cancellationToken = default
     )
     {
         _writer.WriteStartObject();
+
+        // Only present on table entries, where it's the value that messages reference
+        if (key is not null)
+            _writer.WriteString("key", key);
 
         _writer.WriteString("id", emoji.Id.ToString());
         _writer.WriteString("name", emoji.Name);
@@ -330,24 +414,26 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteEndArray();
 
         // Inline emoji
-        _writer.WriteStartArray("inlineEmojis");
+        IEnumerable<Emoji> inlineEmojis = !string.IsNullOrWhiteSpace(embed.Description)
+            ? MarkdownParser
+                .ExtractEmojis(embed.Description)
+                .DistinctBy(e => e.Name, StringComparer.Ordinal)
+                .Select(e => new Emoji(e.Id, e.Name, e.IsAnimated))
+            : [];
 
-        if (!string.IsNullOrWhiteSpace(embed.Description))
+        if (_isNormalized)
         {
-            foreach (
-                var emoji in MarkdownParser
-                    .ExtractEmojis(embed.Description)
-                    .DistinctBy(e => e.Name, StringComparer.Ordinal)
-            )
-            {
-                await WriteEmojiAsync(
-                    new Emoji(emoji.Id, emoji.Name, emoji.IsAnimated),
-                    cancellationToken
-                );
-            }
+            WriteReferenceArray("inlineEmojiKeys", inlineEmojis.Select(RegisterEmoji));
         }
+        else
+        {
+            _writer.WriteStartArray("inlineEmojis");
 
-        _writer.WriteEndArray();
+            foreach (var emoji in inlineEmojis)
+                await WriteEmojiAsync(emoji, cancellationToken: cancellationToken);
+
+            _writer.WriteEndArray();
+        }
 
         _writer.WriteEndObject();
         await _writer.FlushAsync(cancellationToken);
@@ -371,12 +457,36 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteEndObject();
     }
 
+    private async ValueTask WriteStickersAsync(
+        IReadOnlyList<Sticker> stickers,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (_isNormalized)
+        {
+            WriteReferenceArray("stickerIds", stickers.Select(RegisterSticker));
+            return;
+        }
+
+        _writer.WriteStartArray("stickers");
+
+        foreach (var sticker in stickers)
+            await WriteStickerAsync(sticker, cancellationToken);
+
+        _writer.WriteEndArray();
+    }
+
     public override async ValueTask WritePreambleAsync(
         CancellationToken cancellationToken = default
     )
     {
         // Root object (start)
         _writer.WriteStartObject();
+
+        // Modifications made by this fork, so that parsers can detect them up-front
+        _writer.WriteStartObject("mod");
+        _writer.WriteBoolean("normal", _isNormalized);
+        _writer.WriteEndObject();
 
         // Guild
         _writer.WriteStartObject("guild");
@@ -466,10 +576,18 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         }
 
         // Author
-        _writer.WritePropertyName("author");
-        await WriteUserAsync(message.Author, true, cancellationToken);
+        if (_isNormalized)
+        {
+            _writer.WriteString("authorId", RegisterUser(message.Author));
+        }
+        else
+        {
+            _writer.WritePropertyName("author");
+            await WriteUserAsync(message.Author, true, cancellationToken);
+        }
 
         // Attachments
+        // Not normalized: an attachment belongs to exactly one message, so it never repeats
         _writer.WriteStartArray("attachments");
 
         foreach (var attachment in message.Attachments)
@@ -486,12 +604,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteEndArray();
 
         // Stickers
-        _writer.WriteStartArray("stickers");
-
-        foreach (var sticker in message.Stickers)
-            await WriteStickerAsync(sticker, cancellationToken);
-
-        _writer.WriteEndArray();
+        await WriteStickersAsync(message.Stickers, cancellationToken);
 
         // Reactions
         _writer.WriteStartArray("reactions");
@@ -501,13 +614,23 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             _writer.WriteStartObject();
 
             // Emoji
-            _writer.WritePropertyName("emoji");
-            await WriteEmojiAsync(reaction.Emoji, cancellationToken);
+            if (_isNormalized)
+            {
+                _writer.WriteString("emojiKey", RegisterEmoji(reaction.Emoji));
+            }
+            else
+            {
+                _writer.WritePropertyName("emoji");
+                await WriteEmojiAsync(reaction.Emoji, cancellationToken: cancellationToken);
+            }
 
             _writer.WriteNumber("count", reaction.Count);
 
             // Reaction authors
-            _writer.WriteStartArray("users");
+            if (_isNormalized)
+                _writer.WriteStartArray("userIds");
+            else
+                _writer.WriteStartArray("users");
 
             await foreach (
                 var user in Context.Discord.GetMessageReactionsAsync(
@@ -518,7 +641,10 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
                 )
             )
             {
-                await WriteUserAsync(user, false, cancellationToken);
+                if (_isNormalized)
+                    _writer.WriteStringValue(RegisterUser(user));
+                else
+                    await WriteUserAsync(user, false, cancellationToken);
             }
 
             _writer.WriteEndArray();
@@ -529,11 +655,19 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteEndArray();
 
         // Mentions
-        _writer.WriteStartArray("mentions");
-        foreach (var user in message.MentionedUsers)
-            await WriteUserAsync(user, true, cancellationToken);
+        if (_isNormalized)
+        {
+            WriteReferenceArray("mentionIds", message.MentionedUsers.Select(RegisterUser));
+        }
+        else
+        {
+            _writer.WriteStartArray("mentions");
 
-        _writer.WriteEndArray();
+            foreach (var user in message.MentionedUsers)
+                await WriteUserAsync(user, true, cancellationToken);
+
+            _writer.WriteEndArray();
+        }
 
         // Message reference
         if (message.Reference is not null)
@@ -581,12 +715,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             _writer.WriteEndArray();
 
             // Forwarded stickers
-            _writer.WriteStartArray("stickers");
-
-            foreach (var sticker in message.ForwardedMessage.Stickers)
-                await WriteStickerAsync(sticker, cancellationToken);
-
-            _writer.WriteEndArray();
+            await WriteStickersAsync(message.ForwardedMessage.Stickers, cancellationToken);
 
             _writer.WriteEndObject();
         }
@@ -599,31 +728,78 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             _writer.WriteString("id", message.Interaction.Id.ToString());
             _writer.WriteString("name", message.Interaction.Name);
 
-            _writer.WritePropertyName("user");
-            await WriteUserAsync(message.Interaction.User, true, cancellationToken);
+            if (_isNormalized)
+            {
+                _writer.WriteString("userId", RegisterUser(message.Interaction.User));
+            }
+            else
+            {
+                _writer.WritePropertyName("user");
+                await WriteUserAsync(message.Interaction.User, true, cancellationToken);
+            }
 
             _writer.WriteEndObject();
         }
 
         // Inline emoji
-        _writer.WriteStartArray("inlineEmojis");
+        var inlineEmojis = MarkdownParser
+            .ExtractEmojis(message.Content)
+            .DistinctBy(e => e.Name, StringComparer.Ordinal)
+            .Select(e => new Emoji(e.Id, e.Name, e.IsAnimated));
 
-        foreach (
-            var emoji in MarkdownParser
-                .ExtractEmojis(message.Content)
-                .DistinctBy(e => e.Name, StringComparer.Ordinal)
-        )
+        if (_isNormalized)
         {
-            await WriteEmojiAsync(
-                new Emoji(emoji.Id, emoji.Name, emoji.IsAnimated),
-                cancellationToken
-            );
+            WriteReferenceArray("inlineEmojiKeys", inlineEmojis.Select(RegisterEmoji));
         }
+        else
+        {
+            _writer.WriteStartArray("inlineEmojis");
 
-        _writer.WriteEndArray();
+            foreach (var emoji in inlineEmojis)
+                await WriteEmojiAsync(emoji, cancellationToken: cancellationToken);
+
+            _writer.WriteEndArray();
+        }
 
         _writer.WriteEndObject();
         await _writer.FlushAsync(cancellationToken);
+    }
+
+    // Lookup tables for normalized mode. Entries are sorted so that the output is stable across
+    // runs, rather than dependent on the order in which entities happened to be encountered.
+    private async ValueTask WriteLookupTablesAsync(CancellationToken cancellationToken = default)
+    {
+        // Users. Writing these also populates the role table, because a user's roles are
+        // resolved from the context here, so this has to come before the roles are written.
+        _writer.WriteStartArray("users");
+
+        foreach (var user in _users.Values.OrderBy(u => u.Id.Value))
+            await WriteUserAsync(user, true, cancellationToken);
+
+        _writer.WriteEndArray();
+
+        // Roles
+        _writer.WritePropertyName("roles");
+        await WriteRolesAsync(
+            _roles.Values.OrderByDescending(r => r.Position).ThenBy(r => r.Id.Value).ToArray(),
+            cancellationToken
+        );
+
+        // Emojis
+        _writer.WriteStartArray("emojis");
+
+        foreach (var (key, emoji) in _emojis.OrderBy(kvp => kvp.Key, StringComparer.Ordinal))
+            await WriteEmojiAsync(emoji, key, cancellationToken);
+
+        _writer.WriteEndArray();
+
+        // Stickers
+        _writer.WriteStartArray("stickers");
+
+        foreach (var sticker in _stickers.Values.OrderBy(s => s.Id.Value))
+            await WriteStickerAsync(sticker, cancellationToken);
+
+        _writer.WriteEndArray();
     }
 
     public override async ValueTask WritePostambleAsync(
@@ -632,6 +808,9 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
     {
         // Message array (end)
         _writer.WriteEndArray();
+
+        if (_isNormalized)
+            await WriteLookupTablesAsync(cancellationToken);
 
         _writer.WriteNumber("messageCount", MessagesWritten);
 

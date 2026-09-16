@@ -275,6 +275,8 @@ public partial class DashboardViewModel : ViewModelBase
                             dialog.ShouldFormatMarkdown,
                             dialog.ShouldDownloadAssets,
                             dialog.ShouldReuseAssets,
+                            // JSON normalization is a CLI-only option for now
+                            false,
                             _settingsService.Locale,
                             _settingsService.IsUtcNormalizationEnabled
                         );

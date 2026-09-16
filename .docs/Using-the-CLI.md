@@ -223,6 +223,77 @@ Use `--filter` to filter what messages are included in the export.
 
 Documentation on message filter syntax can be found [here](https://github.com/Tyrrrz/DiscordChatExporter/blob/prime/.docs/Message-filters.md).
 
+#### Normalizing the JSON output
+
+> **Note**:
+> This option is specific to this fork and is not available in upstream DiscordChatExporter.
+
+The default JSON output is fully denormalized: every message carries a complete copy of its
+author, and each of those carries a complete copy of each of the author's roles. The same is true
+of the users behind each reaction, of emojis, and of stickers. In a real export the same objects
+are repeated thousands of times.
+
+Use `--normal` to normalize the output instead. Entities that have an identity are written once
+into lookup tables at the root of the document, and referenced by ID from the messages. Because it
+restructures the JSON schema, the option is rejected with an error unless `-f Json` is also set;
+the other export formats are unaffected by it.
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 -f Json --normal
+```
+
+The restructuring is purely a change of shape; no information is lost. These properties are
+replaced by references:
+
+| Denormalized                 | Normalized                        | Refers to           |
+| ---------------------------- | --------------------------------- | ------------------- |
+| `message.author`             | `message.authorId`                | `users`             |
+| `message.mentions`           | `message.mentionIds`              | `users`             |
+| `message.stickers`           | `message.stickerIds`              | `stickers`          |
+| `message.inlineEmojis`       | `message.inlineEmojiKeys`         | `emojis`            |
+| `message.reactions[].emoji`  | `message.reactions[].emojiKey`    | `emojis`            |
+| `message.reactions[].users`  | `message.reactions[].userIds`     | `users`             |
+| `message.interaction.user`   | `message.interaction.userId`      | `users`             |
+| `embed.inlineEmojis`         | `embed.inlineEmojiKeys`           | `emojis`            |
+| `user.roles`                 | `user.roleIds`                    | `roles`             |
+
+and four lookup tables are added to the root of the document: `users`, `roles`, `emojis`, and
+`stickers`. Entries are sorted, so the output is stable across runs.
+
+Attachments are deliberately left inline. An attachment belongs to exactly one message, so unlike
+the entities above it is never actually duplicated, and normalizing it would only add indirection.
+
+Users, roles, and stickers are referenced by their Discord ID. Emojis are referenced by a `key`
+instead, because only custom emojis have an ID: for a custom emoji the key is its ID, and for a
+standard emoji it is the emoji character itself (e.g., `🙂`). Each entry in the `emojis` table
+carries its own `key` property. Treat the key as opaque; in the rare case of a custom emoji that
+was renamed during its lifetime, older messages still reference the older name, and the two
+variants are given distinct keys so that neither name is lost.
+
+Because the tables are per-document, an export split with `--partition` produces partitions that
+each remain independently parseable, with tables covering only the entities that partition uses.
+
+One note for consumers that compare the two shapes: in the denormalized output, a user appearing
+only as a reaction author is written without roles and with their global display name. In the
+normalized output there is a single entry per user, resolved once at the end of the export, so
+such a user may carry their guild nickname, color, and roles. The normalized output is therefore a
+superset; it never holds less.
+
+#### Detecting the fork
+
+The JSON output of this fork always includes a `mod` object at the root of the document, which
+records which of its modifications are in effect, so that parsers can adapt without guessing:
+
+```json
+{
+  "mod": {
+    "normal": true
+  }
+}
+```
+
+An export produced by upstream DiscordChatExporter has no `mod` property at all.
+
 ### Export channels from a specific server
 
 To export all channels in a specific server, use the `exportguild` command and provide the server ID through the `-g|--guild` option:
