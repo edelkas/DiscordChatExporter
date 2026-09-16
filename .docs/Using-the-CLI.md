@@ -374,6 +374,64 @@ normalized output there is a single entry per user, resolved once at the end of 
 such a user may carry their guild nickname, color, and roles. The normalized output is therefore a
 superset; it never holds less.
 
+#### Extended fields
+
+> **Note**:
+> This option is specific to this fork and is not available in upstream DiscordChatExporter.
+
+Discord exposes a good deal more about a user than the original DiscordChatExporter records. Use
+`--extended` to include it:
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 -f Json --extended
+```
+
+Every field this fork adds on top of the original schema is gated behind this option, so **a
+default export stays compatible with vanilla DiscordChatExporter** and can be read by anything
+written against it. The only deviation in a default export is the `mod` object described below,
+which exists precisely so a parser can tell the two apart.
+
+The option is accepted for every format, but currently only the JSON exporter has any extended
+fields to write; the others are unaffected.
+
+With `--extended`, each user object in a JSON export gains the following. Note that the user object
+has always been a merge of Discord's *user* and *guild member* objects — that is where `nickname`,
+`color`, and `roles` already come from — and these follow the same pattern:
+
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `joinedAt` | timestamp or `null` | When the member joined the server |
+| `premiumSince` | timestamp or `null` | When they started boosting the server; `null` if they aren't |
+| `isPending` | boolean | Whether they still have to pass the server's membership screening |
+| `flags` | array of strings | Guild member flags that are set (see below) |
+| `bannerUrl` | string or `null` | Their profile banner |
+
+All of these except `bannerUrl` are guild-scoped, so they are `null` (or `false`, or an empty array)
+for anyone who isn't a member of the server. In practice that means users who left, and users seen
+only as reaction authors — those are never resolved as members, so nothing about their membership is
+known. The export does not invent values for them.
+
+`flags` is written as an array of names rather than the raw bitfield, so that a reader doesn't need
+to know the bit values:
+
+```json
+"flags": ["DidRejoin", "CompletedOnboarding"]
+```
+
+Discord adds member flags over time. Any bit this build doesn't recognise is preserved as its
+numeric value in the same array (e.g. `["DidRejoin", "2048"]`), so no information is lost even
+against a newer API than the one this was built against.
+
+`bannerUrl` is resolved exactly the way `avatarUrl` is: a server-specific banner takes precedence
+over the user's global one, animated banners get a `.gif` URL and static ones `.png`, and with
+`--media` the image is downloaded alongside the other assets. The one difference is that there is no
+default banner, so unlike `avatarUrl` this property is `null` when the user simply hasn't set one.
+
+> **Note**:
+> Discord only includes a banner on the full user object, not on the abbreviated one attached to
+> each message, so `bannerUrl` is populated from the member lookup. A user with no member record
+> will have `null` here even if they do have a banner set.
+
 #### Detecting the fork
 
 The JSON output of this fork always includes a `mod` object at the root of the document, which
@@ -383,6 +441,7 @@ records which of its modifications are in effect, so that parsers can adapt with
 {
   "mod": {
     "normal": true,
+    "extended": true,
     "reactionUsers": false,
     "cache": false
   }
@@ -390,8 +449,12 @@ records which of its modifications are in effect, so that parsers can adapt with
 ```
 
 Each key records one of this fork's modifications: `normal` whether the document is normalized,
-`reactionUsers` whether the users behind each reaction were fetched, and `cache` whether member
-data may have been served from a cache rather than fetched during this export.
+`extended` whether fields beyond the original schema were written, `reactionUsers` whether the users
+behind each reaction were fetched, and `cache` whether member data may have been served from a cache
+rather than fetched during this export.
+
+With `normal` and `extended` both false, the document matches the schema of a vanilla
+DiscordChatExporter export, apart from the presence of this `mod` object itself.
 
 An export produced by upstream DiscordChatExporter has no `mod` property at all.
 

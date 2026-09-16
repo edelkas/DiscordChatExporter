@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Encodings.Web;
@@ -34,6 +35,10 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
     private readonly bool _isNormalized = context.Request.IsNormalized;
 
     private readonly bool _shouldFetchReactionUsers = context.Request.ShouldFetchReactionUsers;
+
+    // Gates every field this fork adds on top of the original DCE schema, so that a default
+    // export stays readable by anything written against vanilla DiscordChatExporter.
+    private readonly bool _isExtended = context.Request.IsExtended;
 
     // In normalized mode, entities that have an identity are written to lookup tables at the root
     // of the document instead of being repeated inline at every occurrence. They are collected
@@ -114,13 +119,25 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteString("name", user.Name);
         _writer.WriteString("discriminator", user.DiscriminatorFormatted);
 
-        _writer.WriteString(
-            "nickname",
-            Context.TryGetMember(user.Id)?.DisplayName ?? user.DisplayName
-        );
+        // Guild-specific member data. It is null for users who are not (or are no longer) members
+        // of the guild, which includes users seen only through reactions.
+        var member = Context.TryGetMember(user.Id);
+
+        _writer.WriteString("nickname", member?.DisplayName ?? user.DisplayName);
 
         _writer.WriteString("color", Context.TryGetUserColor(user.Id)?.ToHexString());
         _writer.WriteBoolean("isBot", user.IsBot);
+
+        if (_isExtended)
+        {
+            _writer.WriteString("joinedAt", member?.JoinedAt?.Pipe(Context.NormalizeDate));
+            _writer.WriteString("premiumSince", member?.PremiumSince?.Pipe(Context.NormalizeDate));
+            _writer.WriteBoolean("isPending", member?.IsPending ?? false);
+
+            // Decomposed rather than written as a bitfield, so that a reader doesn't need to know
+            // the bit values. Bits Discord has added since are kept as their numeric value.
+            WriteReferenceArray("flags", GetFlagNames(member?.Flags ?? MemberFlags.None));
+        }
 
         if (includeRoles)
         {
@@ -148,13 +165,50 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteString(
             "avatarUrl",
             await Context.ResolveAssetUrlAsync(
-                Context.TryGetMember(user.Id)?.AvatarUrl ?? user.AvatarUrl,
+                member?.AvatarUrl ?? user.AvatarUrl,
                 cancellationToken
             )
         );
 
+        if (_isExtended)
+        {
+            // Same precedence as the avatar: a guild-specific banner wins over the global one.
+            // Unlike the avatar there is no fallback, so this stays null when neither is set.
+            //
+            // The member's own copy of the user is consulted before the one we were handed,
+            // because the latter often comes from a message payload, where Discord sends only a
+            // partial user object with no banner on it at all.
+            var bannerUrl = member?.BannerUrl ?? member?.User.BannerUrl ?? user.BannerUrl;
+
+            _writer.WriteString(
+                "bannerUrl",
+                bannerUrl is not null
+                    ? await Context.ResolveAssetUrlAsync(bannerUrl, cancellationToken)
+                    : null
+            );
+        }
+
         _writer.WriteEndObject();
         await _writer.FlushAsync(cancellationToken);
+    }
+
+    // A [Flags] enum's own ToString collapses to the raw number as soon as one bit is unknown,
+    // which would hide the flags that *are* recognized. This keeps both.
+    private static IEnumerable<string> GetFlagNames(MemberFlags flags)
+    {
+        var remaining = (int)flags;
+
+        foreach (var value in Enum.GetValues<MemberFlags>())
+        {
+            if (value == MemberFlags.None || (remaining & (int)value) == 0)
+                continue;
+
+            remaining &= ~(int)value;
+            yield return value.ToString();
+        }
+
+        if (remaining != 0)
+            yield return remaining.ToString(CultureInfo.InvariantCulture);
     }
 
     private async ValueTask WriteEmojiAsync(
@@ -488,6 +542,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         // Modifications made by this fork, so that parsers can detect them up-front
         _writer.WriteStartObject("mod");
         _writer.WriteBoolean("normal", _isNormalized);
+        _writer.WriteBoolean("extended", _isExtended);
         _writer.WriteBoolean("reactionUsers", _shouldFetchReactionUsers);
         // Provenance: member data in this export may be up to the cache TTL old
         _writer.WriteBoolean("cache", Context.Request.IsCacheEnabled);

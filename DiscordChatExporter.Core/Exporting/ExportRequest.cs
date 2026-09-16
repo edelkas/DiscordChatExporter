@@ -43,6 +43,8 @@ public partial class ExportRequest
 
     public bool IsNormalized { get; }
 
+    public bool IsExtended { get; }
+
     public bool ShouldFetchReactionUsers { get; }
 
     public bool IsCacheEnabled { get; }
@@ -68,6 +70,7 @@ public partial class ExportRequest
         bool shouldDownloadAssets,
         bool shouldReuseAssets,
         bool isNormalized,
+        bool isExtended,
         bool shouldFetchReactionUsers,
         bool isCacheEnabled,
         string? locale,
@@ -86,6 +89,7 @@ public partial class ExportRequest
         ShouldDownloadAssets = shouldDownloadAssets;
         ShouldReuseAssets = shouldReuseAssets;
         IsNormalized = isNormalized;
+        IsExtended = isExtended;
         ShouldFetchReactionUsers = shouldFetchReactionUsers;
         IsCacheEnabled = isCacheEnabled;
         Locale = locale;

@@ -277,6 +277,8 @@ public partial class DashboardViewModel : ViewModelBase
                             dialog.ShouldReuseAssets,
                             // JSON normalization is a CLI-only option for now
                             false,
+                            // ...as are the extended fields
+                            false,
                             // As is opting out of reaction users
                             true,
                             // ...and the cross-run member cache

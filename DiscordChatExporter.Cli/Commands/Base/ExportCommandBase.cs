@@ -132,6 +132,14 @@ public abstract class ExportCommandBase : DiscordCommandBase
     }
 
     [CommandOption(
+        "extended",
+        Description = "Include fields that this fork exports but the original DiscordChatExporter "
+            + "does not. Without it, the exported schema stays compatible with vanilla DCE. "
+            + "Currently affects the JSON format only."
+    )]
+    public bool IsExtended { get; set; } = false;
+
+    [CommandOption(
         "normal",
         Description = "Normalize the JSON output: entities that have an identity (users, roles, "
             + "emojis, stickers) are emitted once into lookup tables at the root of the document, "
@@ -378,6 +386,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                             ShouldDownloadAssets,
                                             ShouldReuseAssets,
                                             IsNormalized,
+                                            IsExtended,
                                             ShouldFetchReactionUsers,
                                             IsCacheEnabled,
                                             Locale,
@@ -437,6 +446,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
                     $"{tracer.RateLimitedCount, 8}  ...of which were rate-limited and retried"
                 );
             }
+
             await console.Error.WriteLineAsync();
         }
 
