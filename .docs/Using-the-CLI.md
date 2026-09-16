@@ -223,6 +223,101 @@ Use `--filter` to filter what messages are included in the export.
 
 Documentation on message filter syntax can be found [here](https://github.com/Tyrrrz/DiscordChatExporter/blob/prime/.docs/Message-filters.md).
 
+#### Caching members between runs
+
+> **Note**:
+> This option is specific to this fork and is not available in upstream DiscordChatExporter.
+
+Guild members can't be fetched in bulk, so DCE resolves them one at a time, on demand. Within a
+single run they're resolved once each, but if you split an export into several invocations — by date
+range, or one channel at a time — every run starts from nothing and resolves the same people again.
+Splitting a year into monthly runs took one channel's member lookups from 321 to 815.
+
+Use `--cache` to remember them on disk between runs:
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 --cache
+```
+
+The cache file defaults to `cache.json` next to the executable, and can be moved with
+`--cache-file` or the `DISCORDCHATEXPORTER_CACHE_PATH` environment variable:
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 --cache --cache-file "D:\dce\cache.json"
+```
+
+> **Note**:
+> Moving it is worth doing if you keep the executable in a folder you rebuild or replace, since the
+> default location lives alongside it. Docker users should point it at a mounted volume, as the
+> image's application directory is not a good place to keep state.
+
+**Only member lookups are cached.** The server, its channel list, and its roles amount to a handful
+of requests per run and are exactly the data that changes wholesale, so they are always fetched
+fresh. Messages and reactions are never cached.
+
+##### Staleness
+
+A member's nickname, colour, roles, and avatar are all mutable, and they all end up in the export.
+A cached export therefore records them as they were when they were first fetched, which is the one
+real cost of this option. `--cache-ttl` bounds it — an entry older than the TTL is refetched:
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 --cache --cache-ttl 12h
+```
+
+The default is `1d`. Values can be given as `7d`, `12h`, `90m`, `45s`, or as a full `1.00:00:00`
+timespan. `--cache-ttl 0` forces every member to be refetched while still refreshing the cache,
+which is the way to deliberately bring a stale cache up to date.
+
+Note that the TTL governs how long an entry is *trusted*, not how long it is *kept*: entries are
+retained for 30 days regardless, so running with a short TTL never discards entries that a later
+run with a longer one would have accepted.
+
+Any export produced with this option sets `"cache": true` in the `mod` object, so an archive always
+says whether its member data could have come from a cache.
+
+##### Other details
+
+- Entries are recorded per server, and tagged with the token that produced them. A different
+  account sees a different set of members, so it never reads another account's entries.
+- The cache is advisory: if the file is missing, unreadable, or corrupt, it is treated as empty and
+  the export proceeds normally, rewriting it on the way out.
+- It is written once at the end of a run, atomically, and merged with whatever is already there, so
+  several exports can safely share one cache file. A run that you interrupt still saves what it
+  learned.
+
+#### Skipping reaction users
+
+> **Note**:
+> This option is specific to this fork and is not available in upstream DiscordChatExporter.
+
+For every reaction on every message, the JSON exporter fetches the list of users who reacted, which
+costs one request per 100 users *per reaction*. This is routinely the most expensive part of an
+export: on a year of a busy channel it accounted for 2,001 of 2,463 requests, dwarfing the cost of
+fetching the messages themselves.
+
+The reaction's emoji and its count arrive for free inside the message payload — only the list of
+users costs anything. Use `--reaction-users false` to keep the former and skip the latter:
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 -f Json --reaction-users false
+```
+
+The `users` (or `userIds`, when normalized) property is still written, as an empty array, so the
+schema is unchanged and consumers don't need to special-case it. A reaction only exists when at
+least one person reacted, so `count > 0` with an empty user list unambiguously means the list was
+skipped rather than that nobody reacted — and `mod.reactionUsers` records it explicitly.
+
+The option is accepted for every format, but only the JSON exporter ever fetched these users in the
+first place; HTML, CSV, and plain text exports are byte-identical either way, since they only ever
+rendered the emoji and the count.
+
+Two things to be aware of when the option is disabled:
+
+- In normalized exports, users who *only* ever appear as reaction authors no longer appear in the
+  root `users` table, because nothing references them any more.
+- Combined with `--media`, it also avoids downloading the avatar of every reacting user.
+
 #### Normalizing the JSON output
 
 > **Note**:
@@ -287,10 +382,16 @@ records which of its modifications are in effect, so that parsers can adapt with
 ```json
 {
   "mod": {
-    "normal": true
+    "normal": true,
+    "reactionUsers": false,
+    "cache": false
   }
 }
 ```
+
+Each key records one of this fork's modifications: `normal` whether the document is normalized,
+`reactionUsers` whether the users behind each reaction were fetched, and `cache` whether member
+data may have been served from a cache rather than fetched during this export.
 
 An export produced by upstream DiscordChatExporter has no `mod` property at all.
 

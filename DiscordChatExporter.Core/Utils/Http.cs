@@ -13,7 +13,12 @@ namespace DiscordChatExporter.Core.Utils;
 
 public static class Http
 {
-    public static HttpClient Client { get; } = new();
+    // Only installed when tracing is enabled, so normal runs keep the default handler chain
+    public static HttpRequestTracer? Tracer { get; } =
+        HttpRequestTracer.IsEnabled ? new HttpRequestTracer(new HttpClientHandler()) : null;
+
+    public static HttpClient Client { get; } =
+        Tracer is not null ? new HttpClient(Tracer) : new HttpClient();
 
     private static bool IsRetryableStatusCode(HttpStatusCode statusCode) =>
         statusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.RequestTimeout

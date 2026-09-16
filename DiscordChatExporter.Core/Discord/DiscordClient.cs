@@ -349,7 +349,9 @@ public class DiscordClient(
             yield return Role.Parse(roleJson);
     }
 
-    public async ValueTask<Member?> TryGetGuildMemberAsync(
+    // Exposes the raw payload so that it can be persisted verbatim by a cache, which keeps
+    // cached entries usable as more of the member object gets exported over time.
+    public async ValueTask<JsonElement?> TryGetGuildMemberJsonAsync(
         Snowflake guildId,
         Snowflake memberId,
         CancellationToken cancellationToken = default
@@ -358,11 +360,19 @@ public class DiscordClient(
         if (guildId == Guild.DirectMessages.Id)
             return null;
 
-        var response = await TryGetJsonResponseAsync(
+        return await TryGetJsonResponseAsync(
             $"guilds/{guildId}/members/{memberId}",
             cancellationToken
         );
+    }
 
+    public async ValueTask<Member?> TryGetGuildMemberAsync(
+        Snowflake guildId,
+        Snowflake memberId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var response = await TryGetGuildMemberJsonAsync(guildId, memberId, cancellationToken);
         return response?.Pipe(j => Member.Parse(j, guildId));
     }
 

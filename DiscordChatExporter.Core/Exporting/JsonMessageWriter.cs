@@ -33,6 +33,8 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
     private readonly bool _isNormalized = context.Request.IsNormalized;
 
+    private readonly bool _shouldFetchReactionUsers = context.Request.ShouldFetchReactionUsers;
+
     // In normalized mode, entities that have an identity are written to lookup tables at the root
     // of the document instead of being repeated inline at every occurrence. They are collected
     // while the messages are streamed out and flushed in the postamble, which is also why the
@@ -486,6 +488,9 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         // Modifications made by this fork, so that parsers can detect them up-front
         _writer.WriteStartObject("mod");
         _writer.WriteBoolean("normal", _isNormalized);
+        _writer.WriteBoolean("reactionUsers", _shouldFetchReactionUsers);
+        // Provenance: member data in this export may be up to the cache TTL old
+        _writer.WriteBoolean("cache", Context.Request.IsCacheEnabled);
         _writer.WriteEndObject();
 
         // Guild
@@ -632,19 +637,27 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             else
                 _writer.WriteStartArray("users");
 
-            await foreach (
-                var user in Context.Discord.GetMessageReactionsAsync(
-                    Context.Request.Channel.Id,
-                    message.Id,
-                    reaction.Emoji,
-                    cancellationToken
-                )
-            )
+            // Fetching the reacting users costs a request per 100 of them, per reaction, which
+            // is the single most expensive thing this exporter does. The emoji and the count come
+            // free with the message itself, so they are written either way; only the list is
+            // skipped. It stays an empty array rather than being omitted, so that the schema is
+            // the same in both cases, with 'mod.reactionUsers' recording which one this is.
+            if (_shouldFetchReactionUsers)
             {
-                if (_isNormalized)
-                    _writer.WriteStringValue(RegisterUser(user));
-                else
-                    await WriteUserAsync(user, false, cancellationToken);
+                await foreach (
+                    var user in Context.Discord.GetMessageReactionsAsync(
+                        Context.Request.Channel.Id,
+                        message.Id,
+                        reaction.Emoji,
+                        cancellationToken
+                    )
+                )
+                {
+                    if (_isNormalized)
+                        _writer.WriteStringValue(RegisterUser(user));
+                    else
+                        await WriteUserAsync(user, false, cancellationToken);
+                }
             }
 
             _writer.WriteEndArray();

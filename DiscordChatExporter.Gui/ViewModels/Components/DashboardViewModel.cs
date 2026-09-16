@@ -277,6 +277,10 @@ public partial class DashboardViewModel : ViewModelBase
                             dialog.ShouldReuseAssets,
                             // JSON normalization is a CLI-only option for now
                             false,
+                            // As is opting out of reaction users
+                            true,
+                            // ...and the cross-run member cache
+                            false,
                             _settingsService.Locale,
                             _settingsService.IsUtcNormalizationEnabled
                         );

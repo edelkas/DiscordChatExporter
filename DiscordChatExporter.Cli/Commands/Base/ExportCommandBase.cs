@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CliFx;
 using CliFx.Binding;
@@ -17,6 +18,7 @@ using DiscordChatExporter.Core.Exceptions;
 using DiscordChatExporter.Core.Exporting;
 using DiscordChatExporter.Core.Exporting.Filtering;
 using DiscordChatExporter.Core.Exporting.Partitioning;
+using DiscordChatExporter.Core.Utils;
 using Gress;
 using Spectre.Console;
 
@@ -96,6 +98,15 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool ShouldFormatMarkdown { get; set; } = true;
 
     [CommandOption(
+        "reaction-users",
+        Description = "Fetch the list of users behind each reaction. "
+            + "Only affects the JSON format, and is by far the most expensive part of an export: "
+            + "it costs one request per 100 users per reaction, which routinely dwarfs the cost of "
+            + "fetching the messages themselves. Disable it to keep only the emoji and the count."
+    )]
+    public bool ShouldFetchReactionUsers { get; set; } = true;
+
+    [CommandOption(
         "media",
         Description = "Download assets referenced by the export (user avatars, attached files, embedded images, etc.)."
     )]
@@ -129,6 +140,35 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool IsNormalized { get; set; } = false;
 
     [CommandOption(
+        "cache",
+        Description = "Remember guild members between runs, so that splitting an export into "
+            + "several invocations doesn't re-resolve the same people every time. Only member "
+            + "lookups are cached; everything else is always fetched fresh."
+    )]
+    public bool IsCacheEnabled { get; set; } = false;
+
+    [CommandOption(
+        "cache-ttl",
+        Description = "How long a cached member stays usable, e.g. '7d', '12h', '90m'. "
+            + "Nicknames, roles, and avatars do change, and a cached export records them as they "
+            + "were, so keep this short unless you don't mind. Requires --cache.",
+        Converter = typeof(TimeSpanInputConverter)
+    )]
+    public TimeSpan CacheTtl { get; set; } = TimeSpan.FromDays(1);
+
+    [CommandOption(
+        "cache-file",
+        Description = "Path to the cache file. Defaults to 'cache.json' next to the executable. "
+            + "Requires --cache.",
+        EnvironmentVariable = "DISCORDCHATEXPORTER_CACHE_PATH"
+    )]
+    public string? CacheFilePath
+    {
+        get;
+        set => field = value is not null ? Path.GetFullPath(value) : null;
+    }
+
+    [CommandOption(
         "dateformat",
         Description = "This option doesn't do anything. Kept for backwards compatibility."
     )]
@@ -153,8 +193,24 @@ public abstract class ExportCommandBase : DiscordCommandBase
     )]
     public bool IsUkraineSupportMessageDisabled { get; set; } = false;
 
+    // Lazily initialized, but deliberately not touched for the first time from inside the
+    // parallel export loop: the '??=' is not atomic, so racing threads could each end up with a
+    // separate exporter, and with it a separate cache.
     [field: AllowNull, MaybeNull]
-    protected ChannelExporter Exporter => field ??= new ChannelExporter(Discord);
+    protected ChannelExporter Exporter =>
+        field ??= new ChannelExporter(
+            Discord,
+            new ExportCache(
+                Discord,
+                IsCacheEnabled
+                    ? new MemberCache(
+                        CacheFilePath ?? Path.Combine(AppContext.BaseDirectory, "cache.json"),
+                        CacheTtl,
+                        Token
+                    )
+                    : null
+            )
+        );
 
     protected async ValueTask ExportAsync(IConsole console, IReadOnlyList<Channel> channels)
     {
@@ -171,6 +227,14 @@ public abstract class ExportCommandBase : DiscordCommandBase
         if (!string.IsNullOrWhiteSpace(AssetsDirPath) && !ShouldDownloadAssets)
         {
             throw new CommandException("Option --media-dir cannot be used without --media.");
+        }
+
+        // Cache options only mean something when the cache is on, mirroring --media/--media-dir
+        if (!IsCacheEnabled && (CacheFilePath is not null || CacheTtl != TimeSpan.FromDays(1)))
+        {
+            throw new CommandException(
+                "Options --cache-ttl and --cache-file cannot be used without --cache."
+            );
         }
 
         // Normalization restructures the JSON schema, so it has no meaning for other formats
@@ -250,79 +314,103 @@ public abstract class ExportCommandBase : DiscordCommandBase
             await console.Output.WriteLineAsync($"Fetched {fetchedThreadsCount} thread(s).");
         }
 
+        // Resolve the exporter up-front so that every channel task shares one instance, and with
+        // it one cache of guild data
+        var exporter = Exporter;
+
+        if (IsCacheEnabled)
+            await exporter.Cache.LoadPersistedDataAsync(cancellationToken);
+
         // Export
         var errorsByChannel = new ConcurrentDictionary<Channel, string>();
         var warningsByChannel = new ConcurrentDictionary<Channel, string>();
 
         await console.Output.WriteLineAsync($"Exporting {unwrappedChannels.Count} channel(s)...");
-        await console
-            .CreateProgressTicker()
-            .HideCompleted(
-                // When exporting multiple channels in parallel, hide the completed tasks
-                // because it gets hard to visually parse them as they complete out of order.
-                // https://github.com/Tyrrrz/DiscordChatExporter/issues/1124
-                ParallelLimit > 1
-            )
-            .StartAsync(async ctx =>
-            {
-                await Parallel.ForEachAsync(
-                    unwrappedChannels,
-                    new ParallelOptions
-                    {
-                        MaxDegreeOfParallelism = Math.Max(1, ParallelLimit),
-                        CancellationToken = cancellationToken,
-                    },
-                    async (channel, innerCancellationToken) =>
-                    {
-                        try
-                        {
-                            await ctx.StartTaskAsync(
-                                Markup.Escape(channel.GetHierarchicalName()),
-                                async progress =>
-                                {
-                                    var guild = await Discord.GetGuildAsync(
-                                        channel.GuildId,
-                                        innerCancellationToken
-                                    );
 
-                                    var request = new ExportRequest(
-                                        guild,
-                                        channel,
-                                        OutputPath,
-                                        AssetsDirPath,
-                                        ExportFormat,
-                                        After,
-                                        Before,
-                                        PartitionLimit,
-                                        MessageFilter,
-                                        IsReverseMessageOrder,
-                                        ShouldFormatMarkdown,
-                                        ShouldDownloadAssets,
-                                        ShouldReuseAssets,
-                                        IsNormalized,
-                                        Locale,
-                                        IsUtcNormalizationEnabled
-                                    );
+        try
+        {
+            await console
+                .CreateProgressTicker()
+                .HideCompleted(
+                    // When exporting multiple channels in parallel, hide the completed tasks
+                    // because it gets hard to visually parse them as they complete out of order.
+                    // https://github.com/Tyrrrz/DiscordChatExporter/issues/1124
+                    ParallelLimit > 1
+                )
+                .StartAsync(async ctx =>
+                {
+                    await Parallel.ForEachAsync(
+                        unwrappedChannels,
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = Math.Max(1, ParallelLimit),
+                            CancellationToken = cancellationToken,
+                        },
+                        async (channel, innerCancellationToken) =>
+                        {
+                            try
+                            {
+                                await ctx.StartTaskAsync(
+                                    Markup.Escape(channel.GetHierarchicalName()),
+                                    async progress =>
+                                    {
+                                        // Resolved through the cache, so channels that share a
+                                        // guild don't each re-fetch it. Deliberately kept inside the
+                                        // loop: a guild that fails to resolve is reported per channel
+                                        // and the rest of the export continues.
+                                        var guild = await exporter.Cache.GetGuildAsync(
+                                            channel.GuildId,
+                                            innerCancellationToken
+                                        );
 
-                                    await Exporter.ExportChannelAsync(
-                                        request,
-                                        progress.ToPercentageBased(),
-                                        innerCancellationToken
-                                    );
-                                }
-                            );
+                                        var request = new ExportRequest(
+                                            guild,
+                                            channel,
+                                            OutputPath,
+                                            AssetsDirPath,
+                                            ExportFormat,
+                                            After,
+                                            Before,
+                                            PartitionLimit,
+                                            MessageFilter,
+                                            IsReverseMessageOrder,
+                                            ShouldFormatMarkdown,
+                                            ShouldDownloadAssets,
+                                            ShouldReuseAssets,
+                                            IsNormalized,
+                                            ShouldFetchReactionUsers,
+                                            IsCacheEnabled,
+                                            Locale,
+                                            IsUtcNormalizationEnabled
+                                        );
+
+                                        await exporter.ExportChannelAsync(
+                                            request,
+                                            progress.ToPercentageBased(),
+                                            innerCancellationToken
+                                        );
+                                    }
+                                );
+                            }
+                            catch (ChannelEmptyException ex)
+                            {
+                                warningsByChannel[channel] = ex.Message;
+                            }
+                            catch (DiscordChatExporterException ex) when (!ex.IsFatal)
+                            {
+                                errorsByChannel[channel] = ex.Message;
+                            }
                         }
-                        catch (ChannelEmptyException ex)
-                        {
-                            warningsByChannel[channel] = ex.Message;
-                        }
-                        catch (DiscordChatExporterException ex) when (!ex.IsFatal)
-                        {
-                            errorsByChannel[channel] = ex.Message;
-                        }
-                    }
-                );
-            });
+                    );
+                });
+        }
+        finally
+        {
+            // Persist even when the run was cut short, so that a cancelled export still leaves
+            // the next one less work to do. Deliberately not cancellable for the same reason.
+            if (IsCacheEnabled)
+                await exporter.Cache.SavePersistedDataAsync(CancellationToken.None);
+        }
 
         // Print the result
         using (console.WithForegroundColor(ConsoleColor.White))
@@ -330,6 +418,26 @@ public abstract class ExportCommandBase : DiscordCommandBase
             await console.Output.WriteLineAsync(
                 $"Successfully exported {unwrappedChannels.Count - errorsByChannel.Count} channel(s)."
             );
+        }
+
+        // Print the request breakdown, when tracing is enabled
+        if (Http.Tracer is { } tracer)
+        {
+            await console.Error.WriteLineAsync();
+            await console.Error.WriteLineAsync("API requests by route:");
+
+            foreach (var (route, count) in tracer.Counts)
+                await console.Error.WriteLineAsync($"{count, 8}  {route}");
+
+            await console.Error.WriteLineAsync($"{tracer.TotalCount, 8}  TOTAL");
+
+            if (tracer.RateLimitedCount > 0)
+            {
+                await console.Error.WriteLineAsync(
+                    $"{tracer.RateLimitedCount, 8}  ...of which were rate-limited and retried"
+                );
+            }
+            await console.Error.WriteLineAsync();
         }
 
         // Print warnings

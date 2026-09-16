@@ -8,8 +8,11 @@ using Gress;
 
 namespace DiscordChatExporter.Core.Exporting;
 
-public class ChannelExporter(DiscordClient discord)
+public class ChannelExporter(DiscordClient discord, ExportCache? cache = null)
 {
+    // Shared by every channel this exporter handles, so guild-level data is fetched once per run
+    public ExportCache Cache { get; } = cache ?? new ExportCache(discord);
+
     public async ValueTask ExportChannelAsync(
         ExportRequest request,
         IProgress<Percentage>? progress = null,
@@ -28,7 +31,7 @@ public class ChannelExporter(DiscordClient discord)
         }
 
         // Build context
-        var context = new ExportContext(discord, request);
+        var context = new ExportContext(discord, request, Cache.GetGuildCache(request.Guild.Id));
         await context.PopulateChannelsAndRolesAsync(cancellationToken);
 
         // Initialize the exporter before further checks to ensure the file is created even if
