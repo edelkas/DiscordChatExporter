@@ -17,7 +17,13 @@ public partial record Channel(
     int? Position,
     string? IconUrl,
     string? Topic,
-    bool IsArchived,
+    // Thread-only properties, which stay null for every other kind of channel. They come from the
+    // thread metadata, whose absence is what distinguishes "not a thread" from "not archived".
+    bool? IsArchived,
+    bool? IsLocked,
+    int? MemberCount,
+    // Present on threads (the creator) and on group DMs; absent on ordinary guild channels
+    Snowflake? OwnerId,
     Snowflake? LastMessageId
 ) : IHasId
 {
@@ -94,11 +100,15 @@ public partial record Channel
 
         var topic = json.GetPropertyOrNull("topic")?.GetStringOrNull();
 
-        var isArchived =
-            json.GetPropertyOrNull("thread_metadata")
-                ?.GetPropertyOrNull("archived")
-                ?.GetBooleanOrNull()
-            ?? false;
+        var threadMetadata = json.GetPropertyOrNull("thread_metadata");
+        var isArchived = threadMetadata?.GetPropertyOrNull("archived")?.GetBooleanOrNull();
+        var isLocked = threadMetadata?.GetPropertyOrNull("locked")?.GetBooleanOrNull();
+
+        var memberCount = json.GetPropertyOrNull("member_count")?.GetInt32OrNull();
+
+        var ownerId = json.GetPropertyOrNull("owner_id")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(Snowflake.Parse);
 
         var lastMessageId = json.GetPropertyOrNull("last_message_id")
             ?.GetNonWhiteSpaceStringOrNull()
@@ -114,6 +124,9 @@ public partial record Channel
             iconUrl,
             topic,
             isArchived,
+            isLocked,
+            memberCount,
+            ownerId,
             lastMessageId
         );
     }

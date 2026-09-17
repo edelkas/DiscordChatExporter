@@ -432,6 +432,29 @@ taken minutes apart will legitimately differ.
 Note that a direct-message export has no real server behind it, so these properties are `null` or
 empty there.
 
+##### Channel
+
+The `channel` object gains:
+
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `position` | number or `null` | Position in the server's channel list |
+| `memberCount` | number or `null` | Number of members in a thread |
+| `isArchived` | boolean or `null` | Whether a thread is archived |
+| `isLocked` | boolean or `null` | Whether a thread is locked |
+| `ownerId` | string or `null` | ID of the channel's owner |
+| `owner` / — | user object | The owner, denormalized mode only |
+
+These split along the kind of channel being exported. `position` only exists on ordinary channels;
+`memberCount`, `isArchived`, and `isLocked` come from a thread's metadata and only exist on threads.
+Whichever group doesn't apply is written as `null`, so a `null` here means "not applicable to this
+kind of channel" rather than zero or false — an ordinary channel is not an unarchived thread.
+
+`ownerId` is present on threads, where it is whoever created the thread, and on group DMs. Ordinary
+guild channels have no owner and report `null`. As with the server owner, the user is fetched
+explicitly and so appears in the export even if they never posted in the exported range, `owner`
+inline in a normal export and in the root `users` table under `--normal`.
+
 ##### Users
 
 With `--extended`, each user object in a JSON export gains the following. Note that the user object

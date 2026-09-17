@@ -106,7 +106,7 @@ public partial class GetChannelsCommand : DiscordCommandBase
                 // Thread status
                 using (console.WithForegroundColor(ConsoleColor.White))
                     await console.Output.WriteLineAsync(
-                        channelThread.IsArchived ? "Archived" : "Active"
+                        channelThread.IsArchived == true ? "Archived" : "Active"
                     );
             }
         }

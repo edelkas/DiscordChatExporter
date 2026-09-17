@@ -532,6 +532,51 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteEndArray();
     }
 
+    // Resolving the owner as a member makes them appear in the export even when they never posted
+    // in any of the exported channels, which is the whole point of recording them. The id is always
+    // written; the user object goes inline, or into the lookup table when normalized.
+    private async ValueTask WriteOwnerAsync(
+        Snowflake? ownerId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteString("ownerId", ownerId?.ToString());
+
+        if (ownerId is not { } id)
+            return;
+
+        await Context.PopulateMemberAsync(id, cancellationToken);
+
+        if (Context.TryGetMember(id)?.User is not { } owner)
+            return;
+
+        if (_isNormalized)
+        {
+            RegisterUser(owner);
+        }
+        else
+        {
+            _writer.WritePropertyName("owner");
+            await WriteUserAsync(owner, true, cancellationToken);
+        }
+    }
+
+    // Everything the channel object carries beyond the original DCE schema. Position only exists
+    // on ordinary channels, while the member count and the archived/locked state only exist on
+    // threads, so in practice a channel has one group or the other, never both.
+    private async ValueTask WriteChannelExtrasAsync(
+        Channel channel,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteNumber("position", channel.Position);
+        _writer.WriteNumber("memberCount", channel.MemberCount);
+        _writer.WriteBoolean("isArchived", channel.IsArchived);
+        _writer.WriteBoolean("isLocked", channel.IsLocked);
+
+        await WriteOwnerAsync(channel.OwnerId, cancellationToken);
+    }
+
     // Everything the guild object carries beyond the original DCE schema. The role, emoji, and
     // sticker inventories are the guild's full lists, not merely what the exported messages use,
     // so they follow the same inline-vs-reference rule as every other entity in the document.
@@ -562,27 +607,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteNumber("approximateMemberCount", guild.ApproximateMemberCount);
         _writer.WriteNumber("approximatePresenceCount", guild.ApproximatePresenceCount);
 
-        // Owner. Resolving the member makes the owner appear in the export even when they never
-        // posted in any of the exported channels, which is the whole point of recording them.
-        _writer.WriteString("ownerId", guild.OwnerId?.ToString());
-
-        if (guild.OwnerId is { } ownerId)
-        {
-            await Context.PopulateMemberAsync(ownerId, cancellationToken);
-
-            if (Context.TryGetMember(ownerId)?.User is { } owner)
-            {
-                if (_isNormalized)
-                {
-                    RegisterUser(owner);
-                }
-                else
-                {
-                    _writer.WritePropertyName("owner");
-                    await WriteUserAsync(owner, true, cancellationToken);
-                }
-            }
-        }
+        await WriteOwnerAsync(guild.OwnerId, cancellationToken);
 
         // Roles
         if (_isNormalized)
@@ -676,6 +701,9 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
                 )
             );
         }
+
+        if (_isExtended)
+            await WriteChannelExtrasAsync(Context.Request.Channel, cancellationToken);
 
         _writer.WriteEndObject();
 
