@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
@@ -194,21 +195,126 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
     // A [Flags] enum's own ToString collapses to the raw number as soon as one bit is unknown,
     // which would hide the flags that *are* recognized. This keeps both.
-    private static IEnumerable<string> GetFlagNames(MemberFlags flags)
+    private static IEnumerable<string> GetFlagNames<T>(T flags)
+        where T : struct, Enum
     {
-        var remaining = (int)flags;
+        var remaining = Convert.ToInt32(flags, CultureInfo.InvariantCulture);
 
-        foreach (var value in Enum.GetValues<MemberFlags>())
+        foreach (var value in Enum.GetValues<T>())
         {
-            if (value == MemberFlags.None || (remaining & (int)value) == 0)
+            var bit = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+
+            if (bit == 0 || (remaining & bit) == 0)
                 continue;
 
-            remaining &= ~(int)value;
+            remaining &= ~bit;
             yield return value.ToString();
         }
 
         if (remaining != 0)
             yield return remaining.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static string ToCamelCase(string name)
+    {
+        if (!name.Contains('_', StringComparison.Ordinal))
+            return name;
+
+        var buffer = new StringBuilder(name.Length);
+        var shouldCapitalize = false;
+
+        foreach (var c in name)
+        {
+            if (c == '_')
+            {
+                shouldCapitalize = true;
+                continue;
+            }
+
+            buffer.Append(shouldCapitalize ? char.ToUpperInvariant(c) : c);
+            shouldCapitalize = false;
+        }
+
+        return buffer.ToString();
+    }
+
+    // The component tree is mirrored rather than projected, for the reason given on the Component
+    // record: only the property names are changed, from the API's snake_case to the camelCase used
+    // by every other key in this document. That transform is mechanical and reversible, so the
+    // result can still be read against Discord's own component documentation.
+    private async ValueTask WriteComponentJsonAsync(
+        JsonElement json,
+        bool isMedia = false,
+        CancellationToken cancellationToken = default
+    )
+    {
+        switch (json.ValueKind)
+        {
+            case JsonValueKind.Object:
+                _writer.WriteStartObject();
+
+                foreach (var property in json.EnumerateObject())
+                {
+                    _writer.WritePropertyName(ToCamelCase(property.Name));
+
+                    // Media referenced by a component lives on the CDN behind a signed URL that
+                    // expires within the day, so it has to go through the asset pipeline like an
+                    // attachment does. Only media objects are treated this way: a link button also
+                    // carries a 'url', but that one points at an arbitrary site rather than at a
+                    // downloadable asset.
+                    if (
+                        isMedia
+                        && property.Value.ValueKind is JsonValueKind.String
+                        && property.Name is "url" or "proxy_url"
+                    )
+                    {
+                        _writer.WriteStringValue(
+                            await Context.ResolveAssetUrlAsync(
+                                property.Value.GetString() ?? "",
+                                cancellationToken
+                            )
+                        );
+                    }
+                    else
+                    {
+                        await WriteComponentJsonAsync(
+                            property.Value,
+                            property.NameEquals("media") || property.NameEquals("file"),
+                            cancellationToken
+                        );
+                    }
+                }
+
+                _writer.WriteEndObject();
+                break;
+
+            case JsonValueKind.Array:
+                _writer.WriteStartArray();
+
+                foreach (var item in json.EnumerateArray())
+                    await WriteComponentJsonAsync(item, isMedia, cancellationToken);
+
+                _writer.WriteEndArray();
+                break;
+
+            default:
+                json.WriteTo(_writer);
+                break;
+        }
+    }
+
+    private async ValueTask WriteComponentsAsync(
+        IReadOnlyList<Component> components,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteStartArray("components");
+
+        foreach (var component in components)
+            await WriteComponentJsonAsync(component.Json, cancellationToken: cancellationToken);
+
+        _writer.WriteEndArray();
+        await _writer.FlushAsync(cancellationToken);
     }
 
     private async ValueTask WriteEmojiAsync(
@@ -744,6 +850,9 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         );
         _writer.WriteBoolean("isPinned", message.IsPinned);
 
+        if (_isExtended)
+            WriteReferenceArray("flags", GetFlagNames(message.Flags));
+
         // Content
         if (message.IsSystemNotification)
         {
@@ -787,6 +896,10 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
         // Stickers
         await WriteStickersAsync(message.Stickers, cancellationToken);
+
+        // Components
+        if (_isExtended)
+            await WriteComponentsAsync(message.Components, cancellationToken);
 
         // Reactions
         _writer.WriteStartArray("reactions");
@@ -906,6 +1019,10 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
             // Forwarded stickers
             await WriteStickersAsync(message.ForwardedMessage.Stickers, cancellationToken);
+
+            // Forwarded components
+            if (_isExtended)
+                await WriteComponentsAsync(message.ForwardedMessage.Components, cancellationToken);
 
             _writer.WriteEndObject();
         }

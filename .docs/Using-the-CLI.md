@@ -455,6 +455,59 @@ guild channels have no owner and report `null`. As with the server owner, the us
 explicitly and so appears in the export even if they never posted in the exported range, `owner`
 inline in a normal export and in the root `users` table under `--normal`.
 
+##### Messages
+
+Each message object gains:
+
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `flags` | array of strings | Message flags that are set |
+| `components` | array of objects | The message's component tree |
+
+`flags` follows the same convention as the member flags described below — names rather than a raw
+bitfield, with unrecognised bits kept as their numeric value:
+
+```json
+"flags": ["IsComponentsV2"]
+```
+
+`components` is the interactive and layout content of a message: buttons, select menus, and the
+"components v2" layout nodes (sections, text displays, media galleries, containers, and so on) that
+a bot can use instead of ordinary message content. It is an empty array for the vast majority of
+messages.
+
+This one is worth knowing about even if you don't care about buttons, because a message sent with
+the `IsComponentsV2` flag puts **all** of its text in the component tree and leaves `content` empty.
+Such a message looks blank in a vanilla export; `--extended` is what recovers it.
+
+Unlike every other part of the export, the component tree is a **faithful mirror of the API
+payload** rather than a projection of it. The tree is recursive, every node type has its own set of
+fields, and Discord extends it frequently, so any fixed model would quietly start dropping fields as
+the API moves on. Two consequences:
+
+- Property names are converted from the API's `snake_case` to the `camelCase` used everywhere else
+  in the document (`proxy_url` becomes `proxyUrl`, `content_scan_metadata` becomes
+  `contentScanMetadata`), but nothing else is renamed, reordered, added or removed. Discord's
+  [component documentation](https://discord.com/developers/docs/components/reference) describes the
+  contents directly.
+- The tree is identical with and without `--normal`. Emoji on buttons are *not* lifted into the root
+  `emojis` table, and component nodes are not deduplicated, so a parser needs only one code path for
+  it regardless of the mode.
+
+The single exception to the mirroring is media. A component that references an image or a file does
+so through a `media` or `file` object whose `url` and `proxyUrl` are signed CDN links that expire
+within a day, so both are put through the asset pipeline like an attachment: unchanged by default,
+rewritten to a local path under `--media`. A link button's `url` is deliberately left alone, since it
+points at an arbitrary website rather than at a downloadable asset.
+
+> **Note**:
+> Under `--media`, `url` and `proxyUrl` name the same image but are distinct URLs, so it is
+> downloaded once for each. That costs a duplicate file per component image, in exchange for an
+> archive with no expired links left in it.
+
+Forwarded messages carry their own component tree, so `forwardedMessage` gains a `components` array
+on the same terms.
+
 ##### Users
 
 With `--extended`, each user object in a JSON export gains the following. Note that the user object
