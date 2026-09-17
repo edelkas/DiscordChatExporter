@@ -532,6 +532,95 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteEndArray();
     }
 
+    // Everything the guild object carries beyond the original DCE schema. The role, emoji, and
+    // sticker inventories are the guild's full lists, not merely what the exported messages use,
+    // so they follow the same inline-vs-reference rule as every other entity in the document.
+    private async ValueTask WriteGuildExtrasAsync(
+        Guild guild,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteString("description", guild.Description);
+        _writer.WriteString("vanityUrl", guild.VanityUrl);
+
+        _writer.WriteString(
+            "bannerUrl",
+            guild.BannerUrl is not null
+                ? await Context.ResolveAssetUrlAsync(guild.BannerUrl, cancellationToken)
+                : null
+        );
+
+        _writer.WriteString(
+            "splashUrl",
+            guild.SplashUrl is not null
+                ? await Context.ResolveAssetUrlAsync(guild.SplashUrl, cancellationToken)
+                : null
+        );
+
+        _writer.WriteNumber("premiumTier", guild.PremiumTier);
+        _writer.WriteNumber("premiumSubscriptionCount", guild.PremiumSubscriptionCount);
+        _writer.WriteNumber("approximateMemberCount", guild.ApproximateMemberCount);
+        _writer.WriteNumber("approximatePresenceCount", guild.ApproximatePresenceCount);
+
+        // Owner. Resolving the member makes the owner appear in the export even when they never
+        // posted in any of the exported channels, which is the whole point of recording them.
+        _writer.WriteString("ownerId", guild.OwnerId?.ToString());
+
+        if (guild.OwnerId is { } ownerId)
+        {
+            await Context.PopulateMemberAsync(ownerId, cancellationToken);
+
+            if (Context.TryGetMember(ownerId)?.User is { } owner)
+            {
+                if (_isNormalized)
+                {
+                    RegisterUser(owner);
+                }
+                else
+                {
+                    _writer.WritePropertyName("owner");
+                    await WriteUserAsync(owner, true, cancellationToken);
+                }
+            }
+        }
+
+        // Roles
+        if (_isNormalized)
+        {
+            WriteReferenceArray(
+                "roleIds",
+                guild.Roles.Select(r =>
+                {
+                    _roles.TryAdd(r.Id, r);
+                    return r.Id.ToString();
+                })
+            );
+        }
+        else
+        {
+            _writer.WritePropertyName("roles");
+            await WriteRolesAsync(guild.Roles, cancellationToken);
+        }
+
+        // Emoji
+        if (_isNormalized)
+        {
+            WriteReferenceArray("emojiKeys", guild.Emojis.Select(RegisterEmoji));
+        }
+        else
+        {
+            _writer.WriteStartArray("emojis");
+
+            foreach (var emoji in guild.Emojis)
+                await WriteEmojiAsync(emoji, cancellationToken: cancellationToken);
+
+            _writer.WriteEndArray();
+        }
+
+        // Stickers
+        await WriteStickersAsync(guild.Stickers, cancellationToken);
+    }
+
     public override async ValueTask WritePreambleAsync(
         CancellationToken cancellationToken = default
     )
@@ -549,14 +638,19 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteEndObject();
 
         // Guild
+        var guild = Context.Request.Guild;
+
         _writer.WriteStartObject("guild");
-        _writer.WriteString("id", Context.Request.Guild.Id.ToString());
-        _writer.WriteString("name", Context.Request.Guild.Name);
+        _writer.WriteString("id", guild.Id.ToString());
+        _writer.WriteString("name", guild.Name);
 
         _writer.WriteString(
             "iconUrl",
-            await Context.ResolveAssetUrlAsync(Context.Request.Guild.IconUrl, cancellationToken)
+            await Context.ResolveAssetUrlAsync(guild.IconUrl, cancellationToken)
         );
+
+        if (_isExtended)
+            await WriteGuildExtrasAsync(guild, cancellationToken);
 
         _writer.WriteEndObject();
 

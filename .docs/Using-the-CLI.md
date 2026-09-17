@@ -394,6 +394,46 @@ which exists precisely so a parser can tell the two apart.
 The option is accepted for every format, but currently only the JSON exporter has any extended
 fields to write; the others are unaffected.
 
+##### Server
+
+The `guild` object at the root of the document gains:
+
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `description` | string or `null` | The server's description |
+| `vanityUrl` | string or `null` | Vanity invite, as a full `https://discord.gg/...` URL |
+| `bannerUrl` | string or `null` | Server banner |
+| `splashUrl` | string or `null` | Invite splash image |
+| `premiumTier` | number or `null` | Boost level, 0 to 3 |
+| `premiumSubscriptionCount` | number or `null` | Number of boosts |
+| `approximateMemberCount` | number or `null` | Approximate total members |
+| `approximatePresenceCount` | number or `null` | Approximate members currently online |
+| `ownerId` | string or `null` | ID of the server owner |
+| `owner` / — | user object | The owner, denormalized mode only (see below) |
+| `roles` / `roleIds` | array | **Every** role in the server |
+| `emojis` / `emojiKeys` | array | **Every** custom emoji in the server |
+| `stickers` / `stickerIds` | array | **Every** sticker in the server |
+
+The role, emoji, and sticker lists are the server's complete inventory, not just what the exported
+messages happen to use, so they can be resolved up front without waiting for something to reference
+them. They follow the same inline-versus-reference rule as everything else: full objects in a normal
+export, IDs into the root lookup tables under `--normal`. Under `--normal` the lookup tables
+therefore describe the whole server rather than only what the messages touched.
+
+The owner is fetched explicitly, so they appear in the export even if they never posted in any of
+the exported channels. `ownerId` is written in both modes; the owner's full user object appears
+inline as `owner` in a normal export, and in the root `users` table under `--normal`. That costs one
+extra request per export.
+
+`approximateMemberCount` and `approximatePresenceCount` come from the `with_counts` parameter, which
+this fork always sends when fetching a server. The presence count is a live figure, so two exports
+taken minutes apart will legitimately differ.
+
+Note that a direct-message export has no real server behind it, so these properties are `null` or
+empty there.
+
+##### Users
+
 With `--extended`, each user object in a JSON export gains the following. Note that the user object
 has always been a merge of Discord's *user* and *guild member* objects — that is where `nickname`,
 `color`, and `roles` already come from — and these follow the same pattern:

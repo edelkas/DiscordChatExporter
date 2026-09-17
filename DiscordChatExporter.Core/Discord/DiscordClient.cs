@@ -258,7 +258,13 @@ public class DiscordClient(
         if (guildId == Guild.DirectMessages.Id)
             return Guild.DirectMessages;
 
-        var response = await GetJsonResponseAsync($"guilds/{guildId}", cancellationToken);
+        // 'with_counts' costs nothing extra (same request) and is the only way to get the
+        // approximate member and presence counts
+        var response = await GetJsonResponseAsync(
+            $"guilds/{guildId}?with_counts=true",
+            cancellationToken
+        );
+
         return Guild.Parse(response);
     }
 
