@@ -11,7 +11,12 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
     private int _partitionIndex;
     private MessageWriter? _writer;
 
+    // Only the open partition can report its own size, so the ones already closed are kept here
+    private long _bytesInClosedPartitions;
+
     public long MessagesExported { get; private set; }
+
+    public long BytesExported => _bytesInClosedPartitions + (_writer?.BytesWritten ?? 0);
 
     private async ValueTask<MessageWriter> InitializeWriterAsync(
         CancellationToken cancellationToken = default
@@ -54,6 +59,7 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
             // Writer must be disposed, even if it fails to write the postamble
             finally
             {
+                _bytesInClosedPartitions += _writer.BytesWritten;
                 await _writer.DisposeAsync();
                 _writer = null;
             }
@@ -68,6 +74,8 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
         var writer = await InitializeWriterAsync(cancellationToken);
         await writer.WriteMessageAsync(message, cancellationToken);
         MessagesExported++;
+
+        ExportStats.Current?.ReportExported(MessagesExported, BytesExported);
     }
 
     public async ValueTask DisposeAsync()
@@ -79,6 +87,11 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
             _ = await InitializeWriterAsync();
 
         await UninitializeWriterAsync();
+
+        // Report once more now that the postamble is on disk too. Under --normal that's where the
+        // lookup tables live, which is a sizeable part of the file, so without this the last
+        // number the user sees would sit noticeably below the file they end up with.
+        ExportStats.Current?.ReportExported(MessagesExported, BytesExported);
     }
 }
 

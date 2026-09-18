@@ -567,6 +567,67 @@ default banner, so unlike `avatarUrl` this property is `null` when the user simp
 > each message, so `bannerUrl` is populated from the member lookup. A user with no member record
 > will have `null` here even if they do have a banner set.
 
+#### Reading the progress display
+
+> **Note**:
+> The columns described here are specific to this fork. Upstream DiscordChatExporter shows a
+> progress bar in their place.
+
+While an export runs, each channel gets a line like this:
+
+```
+Misc. / other-games              29%       22,001 msg   22.9 MiB in   13.4 MiB out   407 req
+Misc. / other-games / Sudoku…   100%        28/28 msg   35.3 KiB in   61.5 KiB out     3 req
+```
+
+| Column | Meaning |
+| --- | --- |
+| `msg` | Messages written so far, and the channel total when Discord reports one |
+| `in` | Bytes actually read from Discord for this channel |
+| `out` | Bytes written to the output file |
+| `req` | HTTP requests issued for this channel |
+
+`in` counts the response bodies as they are consumed, so it includes retries and, with `--media`,
+every downloaded asset. Comparing it against `out` is the easiest way to see what `--normal` buys
+you: the example above read 22.9 MiB of API responses and wrote 13.4 MiB, because the repeated
+author and role objects collapse into the lookup tables.
+
+Work that several channels share is charged to whichever one triggered it. Member lookups are
+cached and awaited by every channel that needs them, but only the channel whose request actually
+went out pays for it here, so with `--parallel` the per-channel `req` figures are a fair total but
+an arbitrary split. The pre-export calls that belong to no channel — resolving the guild, listing
+its channels, discovering threads — are not counted against any line.
+
+The display needs roughly 100 columns to lay out without wrapping. It also only appears in an
+interactive terminal: when output is redirected to a file or a pipe, the progress renderer falls
+back to printing just the channel name and the percentage.
+
+##### How the percentage is estimated
+
+**It is interpolated over time, not over messages.** Discord does not report how many messages a
+channel holds, and for a date-ranged export it could not be used anyway, so the exporter measures
+the range it has covered instead of the messages it has written.
+
+Before paginating, it fetches the last message in range — one extra request — and keeps it as the
+*omega*. The first message that comes back becomes the *alpha*. The percentage is then
+
+```
+(current message timestamp - alpha timestamp) / (omega timestamp - alpha timestamp)
+```
+
+Consequences worth knowing:
+
+- A channel that was quiet for six months and then busy for a week sits near the same percentage
+  for a long time, then crawls through the final stretch. A long dead gap makes it jump.
+- It is monotonic, since messages are processed in timestamp order, and it reaches 100% exactly
+  when the omega message is written.
+- If every message shares one timestamp, the division is skipped and it reports 100%.
+
+The `msg` column is the honest counter: for a thread it shows real progress against Discord's own
+total, and everywhere else it at least shows how much work has actually been done. Note that
+Discord's thread count excludes the thread starter message and does not track deletions the way an
+export does, so the ratio can finish a message or two either side of the total.
+
 #### Comparing two exports
 
 > **Note**:

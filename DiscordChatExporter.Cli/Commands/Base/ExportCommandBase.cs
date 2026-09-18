@@ -11,6 +11,7 @@ using CliFx.Binding;
 using CliFx.Infrastructure;
 using DiscordChatExporter.Cli.Commands.Converters;
 using DiscordChatExporter.Cli.Commands.Shared;
+using DiscordChatExporter.Cli.Utils;
 using DiscordChatExporter.Cli.Utils.Extensions;
 using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
@@ -356,8 +357,11 @@ public abstract class ExportCommandBase : DiscordCommandBase
 
         try
         {
+            // Owns the per-channel counters that the progress display reads
+            var statsColumn = new ExportStatsColumn();
+
             await console
-                .CreateProgressTicker()
+                .CreateProgressTicker(statsColumn)
                 .HideCompleted(
                     // When exporting multiple channels in parallel, hide the completed tasks
                     // because it gets hard to visually parse them as they complete out of order.
@@ -375,10 +379,25 @@ public abstract class ExportCommandBase : DiscordCommandBase
                         },
                         async (channel, innerCancellationToken) =>
                         {
+                            // One set of counters per channel, published to the ambient slot so
+                            // that the HTTP handler and the writer can both find it. Each
+                            // iteration of the parallel loop gets its own async context, which is
+                            // what keeps these from bleeding into one another.
+                            var stats = new ExportStats
+                            {
+                                // Only meaningful without a date range, since Discord's count
+                                // covers the whole channel rather than the exported window
+                                TotalMessages =
+                                    After is null && Before is null ? channel.MessageCount : null,
+                            };
+
+                            ExportStats.Current = stats;
+
                             try
                             {
                                 await ctx.StartTaskAsync(
                                     Markup.Escape(channel.GetHierarchicalName()),
+                                    task => statsColumn.Attach(task, stats),
                                     async progress =>
                                     {
                                         // Resolved through the cache, so channels that share a
@@ -450,7 +469,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
         }
 
         // Print the request breakdown, when tracing is enabled
-        if (Http.Tracer is { } tracer)
+        if (HttpRequestTracer.IsEnabled && Http.Tracer is { } tracer)
         {
             await console.Error.WriteLineAsync();
             await console.Error.WriteLineAsync("API requests by route:");

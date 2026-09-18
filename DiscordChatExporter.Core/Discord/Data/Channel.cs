@@ -22,6 +22,9 @@ public partial record Channel(
     bool? IsArchived,
     bool? IsLocked,
     int? MemberCount,
+    // Discord only reports this for threads. It excludes the thread starter message and doesn't
+    // track deletions the way an export does, so treat it as an estimate rather than a target.
+    int? MessageCount,
     // Present on threads (the creator) and on group DMs; absent on ordinary guild channels
     Snowflake? OwnerId,
     Snowflake? LastMessageId
@@ -106,6 +109,8 @@ public partial record Channel
 
         var memberCount = json.GetPropertyOrNull("member_count")?.GetInt32OrNull();
 
+        var messageCount = json.GetPropertyOrNull("message_count")?.GetInt32OrNull();
+
         var ownerId = json.GetPropertyOrNull("owner_id")
             ?.GetNonWhiteSpaceStringOrNull()
             ?.Pipe(Snowflake.Parse);
@@ -126,6 +131,7 @@ public partial record Channel
             isArchived,
             isLocked,
             memberCount,
+            messageCount,
             ownerId,
             lastMessageId
         );
