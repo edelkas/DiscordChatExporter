@@ -634,13 +634,47 @@ To export all channels in a specific server, use the `exportguild` command and p
 
 #### Including threads
 
-By default, threads are not included in the export. You can change this behavior by using `--include-threads` and
-specifying which threads should be included. It has possible values of `none`, `active`, or `all`, indicating which
-threads should be included. To include both active and archived threads, use `--include-threads all`.
+By default, threads are not included in the export. Use `--include-threads` to change that:
 
 ```console
 ./DiscordChatExporter.Cli exportguild -t "mfa.Ifrn" -g 21814 --include-threads all
 ```
+
+| Value | Channels | Threads |
+| --- | --- | --- |
+| `none` (default) | yes | none |
+| `active` | yes | active only |
+| `archived` | yes | archived only |
+| `all` | yes | active and archived |
+| `only` | **no** | active and archived |
+
+> **Note**:
+> `archived` and `only` are specific to this fork and are not available in upstream
+> DiscordChatExporter, which offers `none`, `active` and `all`.
+
+`archived` is the complement of `active`: the two are fetched from different endpoints, so asking
+for one skips the other's requests entirely rather than fetching both and filtering afterwards.
+Together they cover exactly what `all` does.
+
+`only` exports the threads without the channels they hang off. The channels are still resolved,
+because that is the only way to discover threads in the first place, but they are dropped before
+anything is written. Everything that isn't a thread goes, which includes voice channels and forums,
+so `--include-vc` has no effect alongside it. This is what you want for a run that complements an
+earlier `--include-threads none` export of the same period, rather than re-exporting every channel:
+
+```console
+./DiscordChatExporter.Cli exportguild -t "mfa.Ifrn" -g 21814 -f Json --include-threads only -o "threads/%C.json"
+```
+
+Because `only` can still yield many files, the output path has to be a directory or contain
+template tokens, exactly as with the other thread modes.
+
+The `channels` command accepts the same values. There, `only` lists the channels that hold threads
+together with those threads, and omits the channels that have none — a channel is listed for the
+sake of what is underneath it, so there is nothing to show for an empty one.
+
+For backwards compatibility `--include-threads true` still means `active` and
+`--include-threads false` means `none`, and the value is matched case-insensitively.
 
 > **Note**:
 > Upstream DiscordChatExporter drops archived threads when the export is also narrowed by

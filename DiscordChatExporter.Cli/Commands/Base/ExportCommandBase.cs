@@ -67,7 +67,9 @@ public abstract class ExportCommandBase : DiscordCommandBase
 
     [CommandOption(
         "include-threads",
-        Description = "Which types of threads should be included.",
+        Description = "Which types of threads should be included: "
+            + "'none', 'active', 'archived', 'all', or 'only' to export the threads "
+            + "without the channels they live in.",
         Converter = typeof(ThreadInclusionModeInputConverter)
     )]
     public ThreadInclusionMode ThreadInclusionMode { get; set; } = ThreadInclusionMode.None;
@@ -307,7 +309,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
                         await foreach (
                             var thread in Discord.GetChannelThreadsAsync(
                                 channels,
-                                ThreadInclusionMode == ThreadInclusionMode.All,
+                                ThreadInclusionMode.ThreadKinds,
                                 Before,
                                 After,
                                 cancellationToken
@@ -323,9 +325,18 @@ public abstract class ExportCommandBase : DiscordCommandBase
                     }
                 );
 
-            // Remove forums, as they cannot be exported directly and their constituent threads
-            // have already been fetched.
-            unwrappedChannels.RemoveAll(channel => channel.Kind == ChannelKind.GuildForum);
+            if (ThreadInclusionMode.IncludesParentChannels)
+            {
+                // Remove forums, as they cannot be exported directly and their constituent threads
+                // have already been fetched.
+                unwrappedChannels.RemoveAll(channel => channel.Kind == ChannelKind.GuildForum);
+            }
+            else
+            {
+                // Drop everything that isn't a thread, which covers forums as well. The channels
+                // had to be resolved anyway to find the threads hanging off them.
+                unwrappedChannels.RemoveAll(channel => !channel.IsThread);
+            }
 
             await console.Output.WriteLineAsync($"Fetched {fetchedThreadsCount} thread(s).");
         }

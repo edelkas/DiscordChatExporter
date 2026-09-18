@@ -317,13 +317,13 @@ public class DiscordClient(
 
     public async IAsyncEnumerable<Channel> GetGuildThreadsAsync(
         Snowflake guildId,
-        bool includeArchived = false,
+        ThreadKinds threadKinds = ThreadKinds.Active,
         Snowflake? before = null,
         Snowflake? after = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default
     )
     {
-        if (guildId == Guild.DirectMessages.Id)
+        if (guildId == Guild.DirectMessages.Id || threadKinds == ThreadKinds.None)
             yield break;
 
         var channels = await GetGuildChannelsAsync(guildId, cancellationToken);
@@ -331,7 +331,7 @@ public class DiscordClient(
         foreach (
             var channel in await GetChannelThreadsAsync(
                 channels,
-                includeArchived,
+                threadKinds,
                 before,
                 after,
                 cancellationToken
@@ -446,12 +446,15 @@ public class DiscordClient(
 
     public async IAsyncEnumerable<Channel> GetChannelThreadsAsync(
         IReadOnlyList<Channel> channels,
-        bool includeArchived = false,
+        ThreadKinds threadKinds = ThreadKinds.Active,
         Snowflake? before = null,
         Snowflake? after = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default
     )
     {
+        if (threadKinds == ThreadKinds.None)
+            yield break;
+
         var filteredChannels = channels
             // Categories cannot have threads
             .Where(c => !c.IsCategory)
@@ -476,10 +479,16 @@ public class DiscordClient(
         {
             foreach (var channel in filteredChannels)
             {
-                // Either include both active and archived threads, or only active threads
-                foreach (
-                    var isArchived in includeArchived ? new[] { false, true } : new[] { false }
-                )
+                // One pass per requested archive state; asking for neither is already
+                // handled by the early return above
+                var archiveStates = threadKinds switch
+                {
+                    ThreadKinds.Active => new[] { false },
+                    ThreadKinds.Archived => new[] { true },
+                    _ => new[] { false, true },
+                };
+
+                foreach (var isArchived in archiveStates)
                 {
                     // Offset is just the index of the last thread in the previous batch
                     var currentOffset = 0;
@@ -537,38 +546,41 @@ public class DiscordClient(
                 guilds.Add(channel.GuildId);
 
             // Active threads
-            foreach (var guildId in guilds)
+            if (threadKinds.Includes(ThreadKinds.Active))
             {
-                var parentsById = filteredChannels.ToDictionary(c => c.Id);
-
-                var response = await GetJsonResponseAsync(
-                    $"guilds/{guildId}/threads/active",
-                    cancellationToken
-                );
-
-                foreach (var threadJson in response.GetProperty("threads").EnumerateArray())
+                foreach (var guildId in guilds)
                 {
-                    var parent = threadJson
-                        .GetPropertyOrNull("parent_id")
-                        ?.GetNonWhiteSpaceStringOrNull()
-                        ?.Pipe(Snowflake.Parse)
-                        .Pipe(parentsById.GetValueOrDefault);
+                    var parentsById = filteredChannels.ToDictionary(c => c.Id);
 
-                    if (filteredChannels.Contains(parent))
+                    var response = await GetJsonResponseAsync(
+                        $"guilds/{guildId}/threads/active",
+                        cancellationToken
+                    );
+
+                    foreach (var threadJson in response.GetProperty("threads").EnumerateArray())
                     {
-                        var thread = Channel.Parse(threadJson, parent);
+                        var parent = threadJson
+                            .GetPropertyOrNull("parent_id")
+                            ?.GetNonWhiteSpaceStringOrNull()
+                            ?.Pipe(Snowflake.Parse)
+                            .Pipe(parentsById.GetValueOrDefault);
 
-                        if (!IsThreadInRange(thread, before, after))
-                            continue;
+                        if (filteredChannels.Contains(parent))
+                        {
+                            var thread = Channel.Parse(threadJson, parent);
 
-                        if (seenThreadIds.Add(thread.Id))
-                            yield return thread;
+                            if (!IsThreadInRange(thread, before, after))
+                                continue;
+
+                            if (seenThreadIds.Add(thread.Id))
+                                yield return thread;
+                        }
                     }
                 }
             }
 
             // Archived threads
-            if (includeArchived)
+            if (threadKinds.Includes(ThreadKinds.Archived))
             {
                 foreach (var channel in filteredChannels)
                 {

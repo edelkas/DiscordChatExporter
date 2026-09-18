@@ -181,6 +181,8 @@ public partial class DashboardViewModel : ViewModelBase
                     var thread in _discord.GetGuildThreadsAsync(
                         SelectedGuild.Id,
                         _settingsService.ThreadInclusionMode == ThreadInclusionMode.All
+                            ? ThreadKinds.All
+                            : ThreadKinds.Active
                     )
                 )
                 {

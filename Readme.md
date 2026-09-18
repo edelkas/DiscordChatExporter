@@ -12,3 +12,4 @@ This is a fork of [DiscordChatExporter](https://github.com/Tyrrrz/DiscordChatExp
   * Script `compare_exports.py` to compare two exports of the same channel and date range.
 - **Other changes**:
   * New option `--skip-empty` to not export files with 0 messages.
+  * New values for `--include-threads`: `Archived` and `Only` (skips regular channels).
