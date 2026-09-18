@@ -177,6 +177,14 @@ public abstract class ExportCommandBase : DiscordCommandBase
     }
 
     [CommandOption(
+        "skip-empty",
+        Description = "Don't write a file for a channel that has no messages in the exported "
+            + "range. By default such a channel still produces an empty file, which on a whole"
+            + "-server export by date range can be most of the output."
+    )]
+    public bool ShouldSkipEmptyChannels { get; set; } = false;
+
+    [CommandOption(
         "dateformat",
         Description = "This option doesn't do anything. Kept for backwards compatibility."
     )]
@@ -389,6 +397,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                             IsExtended,
                                             ShouldFetchReactionUsers,
                                             IsCacheEnabled,
+                                            ShouldSkipEmptyChannels,
                                             Locale,
                                             IsUtcNormalizationEnabled
                                         );

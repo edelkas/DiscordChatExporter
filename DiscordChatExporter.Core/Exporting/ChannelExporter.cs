@@ -38,13 +38,17 @@ public class ChannelExporter(DiscordClient discord, ExportCache? cache = null)
         // an exception is thrown after this point.
         await using var messageExporter = new MessageExporter(context);
 
+        var emptyOutcome = request.ShouldSkipEmptyChannels
+            ? "no file will be created"
+            : "an empty file will be created";
+
         // Check if the channel is empty
         if (request.Channel.IsEmpty)
         {
             throw new ChannelEmptyException(
                 $"Channel '{request.Channel.Name}' "
                     + $"of guild '{request.Guild.Name}' "
-                    + $"does not contain any messages; an empty file will be created."
+                    + $"does not contain any messages; {emptyOutcome}."
             );
         }
 
@@ -63,7 +67,7 @@ public class ChannelExporter(DiscordClient discord, ExportCache? cache = null)
             throw new ChannelEmptyException(
                 $"Channel '{request.Channel.Name}' "
                     + $"of guild '{request.Guild.Name}' "
-                    + $"does not contain any messages within the specified period; an empty file will be created."
+                    + $"does not contain any messages within the specified period; {emptyOutcome}."
             );
         }
 

@@ -283,6 +283,8 @@ public partial class DashboardViewModel : ViewModelBase
                             true,
                             // ...and the cross-run member cache
                             false,
+                            // ...and skipping channels with nothing in range
+                            false,
                             _settingsService.Locale,
                             _settingsService.IsUtcNormalizationEnabled
                         );

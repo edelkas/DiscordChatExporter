@@ -72,8 +72,10 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        // If not messages were written, force the creation of an empty file
-        if (MessagesExported <= 0)
+        // If no messages were written, force the creation of an empty file, so that the export
+        // still accounts for the channel. The only way nothing is left behind is when the export
+        // was explicitly asked to skip channels that turned out to have nothing in range.
+        if (MessagesExported <= 0 && !context.Request.ShouldSkipEmptyChannels)
             _ = await InitializeWriterAsync();
 
         await UninitializeWriterAsync();

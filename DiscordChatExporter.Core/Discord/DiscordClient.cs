@@ -437,6 +437,13 @@ public class DiscordClient(
         return Channel.Parse(response.Value, parent);
     }
 
+    // Boundary checks for a thread, based only on the thread's own identity: its ID encodes when
+    // it was created, and its last message ID when it last saw activity. Both are exact, which the
+    // archive timestamp is not -- that one is only good for paging through the archived listing.
+    private static bool IsThreadInRange(Channel thread, Snowflake? before, Snowflake? after) =>
+        (before is null || thread.MayHaveMessagesBefore(before.Value))
+        && (after is null || thread.MayHaveMessagesAfter(after.Value));
+
     public async IAsyncEnumerable<Channel> GetChannelThreadsAsync(
         IReadOnlyList<Channel> channels,
         bool includeArchived = false,
@@ -551,6 +558,9 @@ public class DiscordClient(
                     {
                         var thread = Channel.Parse(threadJson, parent);
 
+                        if (!IsThreadInRange(thread, before, after))
+                            continue;
+
                         if (seenThreadIds.Add(thread.Id))
                             yield return thread;
                     }
@@ -564,14 +574,17 @@ public class DiscordClient(
                 {
                     foreach (var archiveType in new[] { "public", "private" })
                     {
-                        // This endpoint parameter expects an ISO8601 timestamp, not a snowflake
-                        var currentBefore = before
-                            ?.ToDate()
-                            .ToString("O", CultureInfo.InvariantCulture);
+                        // This endpoint sorts by archive timestamp, descending, and pages through
+                        // the listing using that same timestamp as the cursor. The cursor is
+                        // deliberately not seeded from the requested 'before' boundary: that
+                        // boundary is about when messages were sent, while this one is about when a
+                        // thread was archived, and a thread that was active during the range may
+                        // well have been archived long after the range ended. Conflating the two
+                        // used to drop every such thread from the export.
+                        string? currentBefore = null;
 
                         while (true)
                         {
-                            // Threads are sorted by archive timestamp, not by last message timestamp
                             var url = new UrlBuilder()
                                 .SetPath($"channels/{channel.Id}/threads/archived/{archiveType}")
                                 .SetQueryParameter("before", currentBefore)
@@ -582,6 +595,9 @@ public class DiscordClient(
                             if (response is null)
                                 break;
 
+                            var previousBefore = currentBefore;
+                            var hasReachedRangeStart = false;
+
                             foreach (
                                 var threadJson in response
                                     .Value.GetProperty("threads")
@@ -590,16 +606,46 @@ public class DiscordClient(
                             {
                                 var thread = Channel.Parse(threadJson, channel);
 
-                                currentBefore = threadJson
-                                    .GetProperty("thread_metadata")
-                                    .GetProperty("archive_timestamp")
-                                    .GetString();
+                                var archivedAt = threadJson
+                                    .GetPropertyOrNull("thread_metadata")
+                                    ?.GetPropertyOrNull("archive_timestamp")
+                                    ?.GetDateTimeOffsetOrNull();
+
+                                if (archivedAt is not null)
+                                {
+                                    currentBefore = archivedAt.Value.ToString(
+                                        "O",
+                                        CultureInfo.InvariantCulture
+                                    );
+                                }
+
+                                // A thread cannot receive messages while it is archived, so its
+                                // archive timestamp is never earlier than its last message. Once
+                                // that timestamp falls below the lower boundary, every remaining
+                                // thread in the listing is older still, so none of them can have
+                                // messages in range either.
+                                if (after is not null && archivedAt < after.Value.ToDate())
+                                {
+                                    hasReachedRangeStart = true;
+                                    break;
+                                }
+
+                                if (!IsThreadInRange(thread, before, after))
+                                    continue;
 
                                 if (seenThreadIds.Add(thread.Id))
                                     yield return thread;
                             }
 
+                            if (hasReachedRangeStart)
+                                break;
+
                             if (!response.Value.GetProperty("has_more").GetBoolean())
+                                break;
+
+                            // A page that produced no usable cursor would otherwise be requested
+                            // over and over
+                            if (currentBefore == previousBefore)
                                 break;
                         }
                     }

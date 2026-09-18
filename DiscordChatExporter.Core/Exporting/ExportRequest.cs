@@ -49,6 +49,8 @@ public partial class ExportRequest
 
     public bool IsCacheEnabled { get; }
 
+    public bool ShouldSkipEmptyChannels { get; }
+
     public string? Locale { get; }
 
     public CultureInfo? CultureInfo { get; }
@@ -73,6 +75,7 @@ public partial class ExportRequest
         bool isExtended,
         bool shouldFetchReactionUsers,
         bool isCacheEnabled,
+        bool shouldSkipEmptyChannels,
         string? locale,
         bool isUtcNormalizationEnabled
     )
@@ -92,6 +95,7 @@ public partial class ExportRequest
         IsExtended = isExtended;
         ShouldFetchReactionUsers = shouldFetchReactionUsers;
         IsCacheEnabled = isCacheEnabled;
+        ShouldSkipEmptyChannels = shouldSkipEmptyChannels;
         Locale = locale;
         IsUtcNormalizationEnabled = isUtcNormalizationEnabled;
 

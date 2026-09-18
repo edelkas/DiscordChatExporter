@@ -223,6 +223,25 @@ Use `--filter` to filter what messages are included in the export.
 
 Documentation on message filter syntax can be found [here](https://github.com/Tyrrrz/DiscordChatExporter/blob/prime/.docs/Message-filters.md).
 
+#### Skipping empty channels
+
+> **Note**:
+> This option is specific to this fork and is not available in upstream DiscordChatExporter.
+
+A channel with no messages in the exported range still produces a file, containing the preamble and
+an empty message list. On a whole-server export narrowed to a date range that is most of the output,
+because every channel that happened to be quiet that year is still written out. Use `--skip-empty`
+to leave those out:
+
+```console
+./DiscordChatExporter.Cli exportguild -t "mfa.Ifrn" -g 21814 -f Json --after 2025-01-01 --before 2026-01-01 --skip-empty
+```
+
+The channel is still reported on the console, with the warning saying that no file will be created
+rather than that an empty one will be, so you can still tell the difference between a channel that
+was skipped and one that was never considered. Nothing else changes: a channel with even one message
+in range is written exactly as before.
+
 #### Caching members between runs
 
 > **Note**:
@@ -548,6 +567,37 @@ default banner, so unlike `avatarUrl` this property is `null` when the user simp
 > each message, so `bannerUrl` is populated from the member lookup. A user with no member record
 > will have `null` here even if they do have a banner set.
 
+#### Comparing two exports
+
+> **Note**:
+> This tool is specific to this fork.
+
+`tools/compare_exports.py` checks two JSON exports of the same channel and period against each
+other. It reads both schemas — rehydrating a `--normal` export through its lookup tables first — so
+a normalized, extended export can be compared directly against a vanilla one:
+
+```console
+python tools/compare_exports.py old/export.json new/export.json
+python tools/compare_exports.py --dir old/2025 new/2025
+```
+
+With `--dir` it walks both trees and compares every pair of files with the same relative path,
+reporting the ones present on only one side. Differences are classified, and the exit code is
+non-zero only for the first kind:
+
+| Class | Meaning |
+| --- | --- |
+| `HARD` | message identity or content differs — a real mismatch |
+| `SOFT` | a value that genuinely changes between two runs (nickname, username, colour, roles, avatar, reaction counts, `exportedAt`) |
+| `MENTN` | message content differing only inside a mention, which the exporter resolves to a *name* at export time, so a rename rewrites old messages |
+| `ADDED` | a key present in only one file — the extended fields and the lookup tables themselves |
+
+Signed CDN query parameters (`ex`, `is`, `hm`) are stripped before comparing, since Discord
+regenerates them on every request. Mention drift is detected by mapping every display name either
+document knows for an ID back to that ID, so a message that mentions a genuinely *different* user
+is still reported as `HARD`. Use `--verbose` to list the soft differences too, `--strict` to fail on
+them, and `--quiet` for just the summary.
+
 #### Detecting the fork
 
 The JSON output of this fork always includes a `mod` object at the root of the document, which
@@ -591,6 +641,16 @@ threads should be included. To include both active and archived threads, use `--
 ```console
 ./DiscordChatExporter.Cli exportguild -t "mfa.Ifrn" -g 21814 --include-threads all
 ```
+
+> **Note**:
+> Upstream DiscordChatExporter drops archived threads when the export is also narrowed by
+> `--before`. Discord's archived-thread listing is paginated by *archive* timestamp, and upstream
+> seeds that cursor with the `--before` boundary, which is a *message* timestamp — so a thread that
+> was busy inside the range but archived after it ends is never even listed. Exporting 2025 with
+> `--before 2026-01-01` therefore silently loses every thread archived in 2026. This fork pages
+> through the listing on its own terms and applies the date range to each thread individually,
+> using the thread's creation and last-message IDs, which are exact. The symptom is easy to miss
+> because it disappears whenever the range runs up to the present.
 
 #### Including voice channels
 
