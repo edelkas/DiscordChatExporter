@@ -25,13 +25,18 @@ public partial record Member(
 ) : IHasId
 {
     public Snowflake Id { get; } = User.Id;
+
+    // True for the stand-in built from a bare user when the guild has no member record: they
+    // left, were never here, or were only ever seen through a reaction. Guild-specific fields on
+    // such an instance are empty because nothing is known, not because nothing was set.
+    public bool IsFallback { get; private init; }
 }
 
 public partial record Member
 {
     // Used for users who are no longer in the guild, so none of the guild-specific data is known
     public static Member CreateFallback(User user) =>
-        new(user, null, null, null, [], null, null, MemberFlags.None, false);
+        new(user, null, null, null, [], null, null, MemberFlags.None, false) { IsFallback = true };
 
     public static Member Parse(JsonElement json, Snowflake? guildId = null)
     {

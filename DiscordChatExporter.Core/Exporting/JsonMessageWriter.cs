@@ -42,6 +42,12 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
     // export stays readable by anything written against vanilla DiscordChatExporter.
     private readonly bool _isExtended = context.Request.IsExtended;
 
+    // Splits the merged user object back into the two things Discord actually has: a global user
+    // and, when there is one, that user's profile inside this guild. Breaks compatibility with
+    // the original DCE schema outright, which is why it is its own flag rather than part of
+    // --extended, and why 'mod.splitUsers' records it.
+    private readonly bool _isUserMemberSplit = context.Request.IsUserMemberSplit;
+
     // In normalized mode, entities that have an identity are written to lookup tables at the root
     // of the document instead of being repeated inline at every occurrence. They are collected
     // while the messages are streamed out and flushed in the postamble, which is also why the
@@ -109,7 +115,9 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteEndArray();
     }
 
-    private async ValueTask WriteUserAsync(
+    // The original DCE shape: one object that is a merge of Discord's user and guild-member
+    // objects, with the nickname, colour and roles of the member folded into the user.
+    private async ValueTask WriteMergedUserAsync(
         User user,
         bool includeRoles = true,
         CancellationToken cancellationToken = default
@@ -188,6 +196,139 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
                     ? await Context.ResolveAssetUrlAsync(bannerUrl, cancellationToken)
                     : null
             );
+        }
+
+        _writer.WriteEndObject();
+        await _writer.FlushAsync(cancellationToken);
+    }
+
+    // Every place a person appears in the export goes through here, so that the two shapes stay
+    // in step. 'includeRoles' only concerns the merged shape, where the original schema omits the
+    // role list for reaction authors; the split shape always writes a whole member object.
+    private async ValueTask WritePersonAsync(
+        User user,
+        bool includeRoles = true,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (!_isUserMemberSplit)
+        {
+            await WriteMergedUserAsync(user, includeRoles, cancellationToken);
+            return;
+        }
+
+        _writer.WriteStartObject();
+
+        await WriteUserFieldsAsync(user, cancellationToken);
+
+        // Whatever the export happens to know. Nothing here is fetched on demand -- the merged
+        // shape reads the very same lookup -- so splitting stays a pure reshaping rather than
+        // quietly dropping the member data a reaction author already had.
+        var member = Context.TryGetMember(user.Id);
+
+        // Null rather than an object full of nulls, so that "this guild has no record of them"
+        // stays distinguishable from "a member who set no nickname and holds no roles"
+        if (member is null or { IsFallback: true })
+        {
+            _writer.WriteNull("member");
+        }
+        else
+        {
+            _writer.WritePropertyName("member");
+            await WriteMemberAsync(member, cancellationToken);
+        }
+
+        _writer.WriteEndObject();
+        await _writer.FlushAsync(cancellationToken);
+    }
+
+    // The user as Discord knows them globally. Written without the surrounding object, so that
+    // the lookup table can reuse it.
+    private async ValueTask WriteUserFieldsAsync(
+        User user,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteString("id", user.Id.ToString());
+        _writer.WriteString("name", user.Name);
+        _writer.WriteString("discriminator", user.DiscriminatorFormatted);
+        _writer.WriteString("displayName", user.DisplayName);
+        _writer.WriteBoolean("isBot", user.IsBot);
+
+        _writer.WriteString(
+            "avatarUrl",
+            await Context.ResolveAssetUrlAsync(user.AvatarUrl, cancellationToken)
+        );
+
+        if (_isExtended)
+        {
+            // The user attached to a message is a partial object that Discord sends without a
+            // banner, so the member's own copy of it is consulted first
+            var bannerUrl = Context.TryGetMember(user.Id)?.User.BannerUrl ?? user.BannerUrl;
+
+            _writer.WriteString(
+                "bannerUrl",
+                bannerUrl is not null
+                    ? await Context.ResolveAssetUrlAsync(bannerUrl, cancellationToken)
+                    : null
+            );
+        }
+    }
+
+    // The same shape the 'exportusers' command writes, so that one parser covers both documents
+    private async ValueTask WriteMemberAsync(
+        Member member,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteStartObject();
+
+        _writer.WriteString("userId", member.Id.ToString());
+        _writer.WriteString("nickname", member.DisplayName);
+        _writer.WriteString("displayName", member.DisplayName ?? member.User.DisplayName);
+        _writer.WriteString("color", Context.TryGetUserColor(member.Id)?.ToHexString());
+
+        // Guild-specific overrides only; the global ones stay on the user
+        _writer.WriteString(
+            "avatarUrl",
+            member.AvatarUrl is not null
+                ? await Context.ResolveAssetUrlAsync(member.AvatarUrl, cancellationToken)
+                : null
+        );
+
+        if (_isExtended)
+        {
+            _writer.WriteString(
+                "bannerUrl",
+                member.BannerUrl is not null
+                    ? await Context.ResolveAssetUrlAsync(member.BannerUrl, cancellationToken)
+                    : null
+            );
+
+            _writer.WriteString("joinedAt", member.JoinedAt?.Pipe(Context.NormalizeDate));
+            _writer.WriteString("premiumSince", member.PremiumSince?.Pipe(Context.NormalizeDate));
+            _writer.WriteBoolean("isPending", member.IsPending);
+            WriteReferenceArray("flags", GetFlagNames(member.Flags));
+        }
+
+        var roles = Context.GetUserRoles(member.Id);
+
+        if (_isNormalized)
+        {
+            // Role order is significant (descending by position), so it's preserved here
+            WriteReferenceArray(
+                "roleIds",
+                roles.Select(r =>
+                {
+                    _roles.TryAdd(r.Id, r);
+                    return r.Id.ToString();
+                })
+            );
+        }
+        else
+        {
+            _writer.WritePropertyName("roles");
+            await WriteRolesAsync(roles, cancellationToken);
         }
 
         _writer.WriteEndObject();
@@ -646,7 +787,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         else
         {
             _writer.WritePropertyName("owner");
-            await WriteUserAsync(owner, true, cancellationToken);
+            await WritePersonAsync(owner, true, cancellationToken);
         }
     }
 
@@ -746,6 +887,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteStartObject("mod");
         _writer.WriteBoolean("normal", _isNormalized);
         _writer.WriteBoolean("extended", _isExtended);
+        _writer.WriteBoolean("splitUsers", _isUserMemberSplit);
         _writer.WriteBoolean("reactionUsers", _shouldFetchReactionUsers);
         // Provenance: member data in this export may be up to the cache TTL old
         _writer.WriteBoolean("cache", Context.Request.IsCacheEnabled);
@@ -857,7 +999,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         else
         {
             _writer.WritePropertyName("author");
-            await WriteUserAsync(message.Author, true, cancellationToken);
+            await WritePersonAsync(message.Author, true, cancellationToken);
         }
 
         // Attachments
@@ -929,7 +1071,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
                     if (_isNormalized)
                         _writer.WriteStringValue(RegisterUser(user));
                     else
-                        await WriteUserAsync(user, false, cancellationToken);
+                        await WritePersonAsync(user, false, cancellationToken);
                 }
             }
 
@@ -950,7 +1092,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             _writer.WriteStartArray("mentions");
 
             foreach (var user in message.MentionedUsers)
-                await WriteUserAsync(user, true, cancellationToken);
+                await WritePersonAsync(user, true, cancellationToken);
 
             _writer.WriteEndArray();
         }
@@ -1025,7 +1167,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             else
             {
                 _writer.WritePropertyName("user");
-                await WriteUserAsync(message.Interaction.User, true, cancellationToken);
+                await WritePersonAsync(message.Interaction.User, true, cancellationToken);
             }
 
             _writer.WriteEndObject();
@@ -1059,14 +1201,46 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
     // runs, rather than dependent on the order in which entities happened to be encountered.
     private async ValueTask WriteLookupTablesAsync(CancellationToken cancellationToken = default)
     {
-        // Users. Writing these also populates the role table, because a user's roles are
-        // resolved from the context here, so this has to come before the roles are written.
+        var orderedUsers = _users.Values.OrderBy(u => u.Id.Value).ToArray();
+
+        // Users. In the merged shape, writing these is also what populates the role table,
+        // because a user's roles are resolved from the context here; under --split-users that
+        // job falls to the members table below. Either way, both precede the roles.
         _writer.WriteStartArray("users");
 
-        foreach (var user in _users.Values.OrderBy(u => u.Id.Value))
-            await WriteUserAsync(user, true, cancellationToken);
+        foreach (var user in orderedUsers)
+        {
+            if (_isUserMemberSplit)
+            {
+                _writer.WriteStartObject();
+                await WriteUserFieldsAsync(user, cancellationToken);
+                _writer.WriteEndObject();
+            }
+            else
+            {
+                await WriteMergedUserAsync(user, true, cancellationToken);
+            }
+        }
 
         _writer.WriteEndArray();
+
+        // Members. A second table rather than a nesting, because both are keyed by the same ID:
+        // a member has no identity of its own. Anyone this guild has no record of is simply
+        // absent from it. This is also what fills the role table under --split-users.
+        if (_isUserMemberSplit)
+        {
+            _writer.WriteStartArray("members");
+
+            foreach (var user in orderedUsers)
+            {
+                if (Context.TryGetMember(user.Id) is not { IsFallback: false } member)
+                    continue;
+
+                await WriteMemberAsync(member, cancellationToken);
+            }
+
+            _writer.WriteEndArray();
+        }
 
         // Roles
         _writer.WritePropertyName("roles");

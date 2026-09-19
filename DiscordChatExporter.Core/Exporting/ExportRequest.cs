@@ -45,6 +45,8 @@ public partial class ExportRequest
 
     public bool IsExtended { get; }
 
+    public bool IsUserMemberSplit { get; }
+
     public bool ShouldFetchReactionUsers { get; }
 
     public bool IsCacheEnabled { get; }
@@ -73,6 +75,7 @@ public partial class ExportRequest
         bool shouldReuseAssets,
         bool isNormalized,
         bool isExtended,
+        bool isUserMemberSplit,
         bool shouldFetchReactionUsers,
         bool isCacheEnabled,
         bool shouldSkipEmptyChannels,
@@ -93,6 +96,7 @@ public partial class ExportRequest
         ShouldReuseAssets = shouldReuseAssets;
         IsNormalized = isNormalized;
         IsExtended = isExtended;
+        IsUserMemberSplit = isUserMemberSplit;
         ShouldFetchReactionUsers = shouldFetchReactionUsers;
         IsCacheEnabled = isCacheEnabled;
         ShouldSkipEmptyChannels = shouldSkipEmptyChannels;

@@ -143,6 +143,15 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool IsExtended { get; set; } = false;
 
     [CommandOption(
+        "split-users",
+        Description = "Write the guild-specific member profile as its own object instead of "
+            + "folding its nickname, colour and roles into the user. Mirrors what 'exportusers' "
+            + "produces. Breaks compatibility with the original DiscordChatExporter schema. "
+            + "Only valid with '--format json'."
+    )]
+    public bool IsUserMemberSplit { get; set; } = false;
+
+    [CommandOption(
         "normal",
         Description = "Normalize the JSON output: entities that have an identity (users, roles, "
             + "emojis, stickers) are emitted once into lookup tables at the root of the document, "
@@ -260,6 +269,15 @@ public abstract class ExportCommandBase : DiscordCommandBase
         if (IsNormalized && ExportFormat != ExportFormat.Json)
         {
             throw new CommandException("Option --normal can only be used with '--format json'.");
+        }
+
+        // Same reasoning: the other writers render a single name and have nowhere to put a
+        // member object
+        if (IsUserMemberSplit && ExportFormat != ExportFormat.Json)
+        {
+            throw new CommandException(
+                "Option --split-users can only be used with '--format json'."
+            );
         }
 
         // Make sure the user does not try to export multiple channels into one file.
@@ -425,6 +443,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                             ShouldReuseAssets,
                                             IsNormalized,
                                             IsExtended,
+                                            IsUserMemberSplit,
                                             ShouldFetchReactionUsers,
                                             IsCacheEnabled,
                                             ShouldSkipEmptyChannels,

@@ -281,6 +281,8 @@ public partial class DashboardViewModel : ViewModelBase
                             false,
                             // ...as are the extended fields
                             false,
+                            // ...and splitting users from members
+                            false,
                             // As is opting out of reaction users
                             true,
                             // ...and the cross-run member cache

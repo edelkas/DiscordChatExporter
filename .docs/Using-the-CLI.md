@@ -532,7 +532,8 @@ on the same terms.
 
 With `--extended`, each user object in a JSON export gains the following. Note that the user object
 has always been a merge of Discord's *user* and *guild member* objects — that is where `nickname`,
-`color`, and `roles` already come from — and these follow the same pattern:
+`color`, and `roles` already come from — and these follow the same pattern. See
+[Splitting users from members](#splitting-users-from-members) for taking the two apart:
 
 | Property | Type | Meaning |
 | --- | --- | --- |
@@ -567,6 +568,94 @@ default banner, so unlike `avatarUrl` this property is `null` when the user simp
 > Discord only includes a banner on the full user object, not on the abbreviated one attached to
 > each message, so `bannerUrl` is populated from the member lookup. A user with no member record
 > will have `null` here even if they do have a banner set.
+
+#### Splitting users from members
+
+Everywhere a person appears in a JSON export -- a message author, a mention, a reaction author, a
+channel or server owner, the invoker of an interaction -- the object written there is a **merge** of
+two different things Discord has: the *user* (a global account) and the *guild member* (that
+account's profile inside this one server). `nickname`, `color` and `roles` on a user object have
+always come from the member; `--extended` adds `joinedAt`, `premiumSince`, `isPending` and `flags`
+to the same pile.
+
+`--split-users` writes them as the two objects they actually are, using the same field names as the
+[`exportusers`](#export-the-members-of-a-server) document, so one parser covers both:
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 21814 -f Json --split-users
+```
+
+```jsonc
+"author": {
+  "id": "66155023779758080",
+  "name": "m.tthew",
+  "discriminator": "0000",
+  "displayName": "matthew",      // their global display name, never the nickname
+  "isBot": false,
+  "avatarUrl": "https://cdn.discordapp.com/avatars/...",   // global avatar
+  "bannerUrl": null,             // global banner, with --extended
+  "member": {
+    "userId": "66155023779758080",
+    "nickname": "trackpadtimmy", // null when they never set one
+    "displayName": "trackpadtimmy",
+    "color": "#D7342A",
+    "avatarUrl": null,           // server-specific override only
+    "bannerUrl": null,           // server-specific override only, with --extended
+    "joinedAt": "...",           // with --extended
+    "premiumSince": null,        // with --extended
+    "isPending": false,          // with --extended
+    "flags": [],                 // with --extended
+    "roles": [ /* highest first */ ]
+  }
+}
+```
+
+> **Warning**:
+> This breaks compatibility with the original DiscordChatExporter schema outright, which is why it
+> is a flag of its own rather than part of `--extended`. `mod.splitUsers` records it.
+
+The two flags are orthogonal: `--split-users` changes the *shape*, `--extended` changes which
+*fields* exist. Using both gives exactly the field set that `exportusers` writes.
+
+##### Why the nesting is the other way round
+
+In an `exportusers` document the member is the outer object and the user is nested inside it,
+because every entry there *is* a member. In a message export the opposite is true: the person is
+first and foremost a user, and membership is contingent. So the user is the outer object and
+`member` is a property on it that can be `null`.
+
+That null is the point. It means "this export has no member data for them", which covers:
+
+- they left the server, or were never in it, or the account no longer exists;
+- nothing in the export ever caused them to be looked up. Reaction authors are the usual case:
+  resolving one costs a member lookup, and the exporter will not spend that on every person who
+  ever clicked an emoji. A reaction author who also wrote a message in the same export *does* get
+  a member object, because by then it is already known.
+
+Written the other way round, those people would get a member object full of nulls, which reads as
+"a member who set no nickname and holds no roles" -- a claim the export is in no position to make.
+
+**Splitting never removes information.** Every field is read from exactly the same place the merged
+shape reads it, so the two carry the same data and either can be derived from the other. The one
+asymmetry is in the merged shape's favour of brevity: it omits the role list for reaction authors,
+where the split shape writes the whole member object. `tools/compare_exports.py` understands both,
+so a split export can be diffed against a vanilla one directly.
+
+##### With `--normal`
+
+Normalization splits the root `users` table in two, keyed by the same ID, since a member has no
+identity of its own:
+
+```jsonc
+{
+  "users": [ { "id": "...", "name": "...", /* global fields only */ } ],
+  "members": [ { "userId": "...", "nickname": "...", "roleIds": ["..."] } ]
+}
+```
+
+Anyone the server has no member record for is simply absent from `members`. The references
+themselves are unchanged: `authorId`, `mentionIds` and the reaction `userIds` are the same IDs as
+before, and now resolve against either table.
 
 #### Reading the progress display
 
@@ -670,6 +759,7 @@ records which of its modifications are in effect, so that parsers can adapt with
   "mod": {
     "normal": true,
     "extended": true,
+    "splitUsers": false,
     "reactionUsers": false,
     "cache": false
   }
@@ -677,11 +767,12 @@ records which of its modifications are in effect, so that parsers can adapt with
 ```
 
 Each key records one of this fork's modifications: `normal` whether the document is normalized,
-`extended` whether fields beyond the original schema were written, `reactionUsers` whether the users
+`extended` whether fields beyond the original schema were written, `splitUsers` whether the user and
+guild-member objects are written separately instead of merged, `reactionUsers` whether the users
 behind each reaction were fetched, and `cache` whether member data may have been served from a cache
 rather than fetched during this export.
 
-With `normal` and `extended` both false, the document matches the schema of a vanilla
+With `normal`, `extended` and `splitUsers` all false, the document matches the schema of a vanilla
 DiscordChatExporter export, apart from the presence of this `mod` object itself.
 
 An export produced by upstream DiscordChatExporter has no `mod` property at all.

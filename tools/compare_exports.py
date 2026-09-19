@@ -52,6 +52,8 @@ SOFT_PATTERNS = [
     r"^exportedAt$",
     # Guild and channel metadata can be edited between two runs
     r"^guild\.(name|iconUrl)$",
+    # Discord's own estimates, sampled at whatever moment each export asked
+    r"^guild\.approximate(Member|Presence)Count$",
     r"^channel\.(name|category|topic|position|memberCount|isArchived|isLocked)$",
     # Per-member state: a nickname, a colour, a role set and an avatar are all mutable, and the
     # author object is embedded in every single message, so one rename shows up thousands of
@@ -211,14 +213,111 @@ def canon(value):
     return value
 
 
+# ---------------------------------------------------------------------------- un-splitting
+
+
+def merge_person(user: dict, member: dict | None, extended: bool) -> dict:
+    """Fold a --split-users user/member pair back into the single merged object.
+
+    Vanilla DCE writes one object per person, with the guild member's nickname, colour and roles
+    folded into the user. This reverses that so a split export can be compared against one that
+    isn't. Role references are left as 'roleIds' for the rehydrator to expand, or as 'roles' when
+    the document wasn't normalized.
+    """
+    out = {
+        "id": user["id"],
+        "name": user["name"],
+        "discriminator": user["discriminator"],
+        # The merged writer falls back to the user's own display name when there is no nickname,
+        # which is exactly what the member's 'displayName' already resolves to
+        "nickname": member["displayName"] if member else user["displayName"],
+        "color": member["color"] if member else None,
+        "isBot": user["isBot"],
+    }
+
+    if extended:
+        out["joinedAt"] = member["joinedAt"] if member else None
+        out["premiumSince"] = member["premiumSince"] if member else None
+        out["isPending"] = member["isPending"] if member else False
+        out["flags"] = member["flags"] if member else []
+
+    # Whichever form the member object used; absent for someone with no member record, who the
+    # merged writer gives an empty list
+    if member is not None and "roleIds" in member:
+        out["roleIds"] = member["roleIds"]
+    elif member is not None:
+        out["roles"] = member["roles"]
+
+    # A guild-specific override wins, exactly as the merged writer resolves it
+    out["avatarUrl"] = (member and member["avatarUrl"]) or user["avatarUrl"]
+    if extended:
+        out["bannerUrl"] = (member and member["bannerUrl"]) or user["bannerUrl"]
+
+    return out
+
+
+def unsplit_inline(doc: dict, extended: bool) -> dict:
+    """Merge the split person objects of a non-normalized export back together, in place."""
+
+    def person(obj, with_roles: bool):
+        if obj is None or "member" not in obj:
+            return obj
+        merged = merge_person(obj, obj["member"], extended)
+        if not with_roles:
+            # Reaction authors never carry roles in the merged shape
+            merged.pop("roles", None)
+            merged.pop("roleIds", None)
+        elif "roles" not in merged and "roleIds" not in merged:
+            merged["roles"] = []
+        return merged
+
+    doc = dict(doc)
+
+    for key in ("guild", "channel"):
+        if isinstance(doc.get(key), dict) and "owner" in doc[key]:
+            doc[key] = dict(doc[key])
+            doc[key]["owner"] = person(doc[key]["owner"], with_roles=True)
+
+    messages = []
+    for m in doc.get("messages", []):
+        m = dict(m)
+        if "author" in m:
+            m["author"] = person(m["author"], with_roles=True)
+        if "mentions" in m:
+            m["mentions"] = [person(u, with_roles=True) for u in m["mentions"]]
+        if "reactions" in m:
+            m["reactions"] = [
+                {**r, "users": [person(u, with_roles=False) for u in r.get("users", [])]}
+                if "users" in r
+                else r
+                for r in m["reactions"]
+            ]
+        if isinstance(m.get("interaction"), dict) and "user" in m["interaction"]:
+            m["interaction"] = dict(m["interaction"])
+            m["interaction"]["user"] = person(m["interaction"]["user"], with_roles=True)
+        messages.append(m)
+
+    doc["messages"] = messages
+    return doc
+
+
 # ---------------------------------------------------------------------------- rehydration
 
 
 class Rehydrator:
     """Turns a --normal export back into the shape a vanilla export would have written."""
 
-    def __init__(self, doc: dict):
+    def __init__(self, doc: dict, extended: bool = False):
         self.users = {u["id"]: u for u in doc.get("users", [])}
+
+        # Under --split-users the table holds plain users and the guild profiles live in a second
+        # one, keyed by the same ID. Merge them up-front so the rest of this class is unaffected.
+        if "members" in doc:
+            members = {m["userId"]: m for m in doc["members"]}
+            self.users = {
+                i: merge_person(u, members.get(i), extended) for i, u in self.users.items()
+            }
+
         self.roles = {r["id"]: r for r in doc.get("roles", [])}
         self.emojis = {e["key"]: e for e in doc.get("emojis", [])}
         self.stickers = {s["id"]: s for s in doc.get("stickers", [])}
@@ -231,6 +330,7 @@ class Rehydrator:
             return {"id": user_id, "__dangling__": True}
         u = dict(u)
         role_ids = u.pop("roleIds", None)
+        u.pop("roles", None)
         if with_roles:
             # Role order is significant and preserved by the writer, so keep it
             u["roles"] = [self.role(r) for r in (role_ids or [])]
@@ -270,6 +370,10 @@ class Rehydrator:
             m["stickers"] = [self.sticker(i) for i in m.pop("stickerIds")]
         if "inlineEmojiKeys" in m:
             m["inlineEmojis"] = [self.emoji(k) for k in m.pop("inlineEmojiKeys")]
+        if "embeds" in m:
+            m["embeds"] = [self.embed(e) for e in m["embeds"]]
+        if isinstance(m.get("forwardedMessage"), dict):
+            m["forwardedMessage"] = self.message(m["forwardedMessage"])
         if "reactions" in m:
             reactions = []
             for r in m["reactions"]:
@@ -287,6 +391,15 @@ class Rehydrator:
                 it["user"] = self.user(it.pop("userId"), with_roles=True)
             m["interaction"] = it
         return m
+
+    def embed(self, e: dict) -> dict:
+        # An embed's description can mention custom emoji too, and they are lifted into the same
+        # root table as a message's
+        if "inlineEmojiKeys" not in e:
+            return e
+        e = dict(e)
+        e["inlineEmojis"] = [self.emoji(k) for k in e.pop("inlineEmojiKeys")]
+        return e
 
     def guild(self, g: dict) -> dict:
         # The extended guild inventory is normalized the same way; expand it so that two
@@ -320,16 +433,27 @@ def load(path: str) -> tuple[dict, dict]:
     except OSError as ex:
         raise Unreadable(str(ex)) from None
     mod = doc.get("mod") or {}
+    extended = bool(mod.get("extended"))
+    # Which options an export was produced with is exactly what is expected to differ between
+    # the two files, so it is reported in the header rather than diffed
+    doc.pop("mod", None)
+    split = bool(mod.get("splitUsers"))
+
     if mod.get("normal"):
-        r = Rehydrator(doc)
+        r = Rehydrator(doc, extended)
         doc = dict(doc)
         doc["guild"] = r.guild(doc["guild"])
         doc["messages"] = [r.message(m) for m in doc["messages"]]
-        for table in ("users", "roles", "emojis", "stickers"):
+        for table in ("users", "members", "roles", "emojis", "stickers"):
             doc.pop(table, None)
-        info = {"normal": True, "extended": bool(mod.get("extended")), "dangling": r.dangling}
+        dangling = r.dangling
     else:
-        info = {"normal": False, "extended": bool(mod.get("extended")), "dangling": []}
+        if split:
+            doc = unsplit_inline(doc, extended)
+        dangling = []
+
+    info = {"normal": bool(mod.get("normal")), "extended": extended, "split": split,
+            "dangling": dangling}
     return doc, info
 
 
