@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using CliFx.Infrastructure;
 using DiscordChatExporter.Cli.Utils;
@@ -25,19 +26,27 @@ internal static class ConsoleExtensions
             console.CreateAnsiConsole().Status().AutoRefresh(true);
 
         // The progress bar is deliberately absent: the percentage already carries that number,
-        // and the space is better spent on the export's live counters
-        public Progress CreateProgressTicker(ExportStatsColumn statsColumn) =>
-            console
+        // and the space is better spent on the export's live counters. Those arrive as an extra
+        // column, which a caller with nothing to count (the member export) simply omits.
+        public Progress CreateProgressTicker(ProgressColumn? extraColumn = null)
+        {
+            var columns = new List<ProgressColumn>
+            {
+                new TaskDescriptionColumn { Alignment = Justify.Left },
+                new PercentageColumn(),
+            };
+
+            if (extraColumn is not null)
+                columns.Add(extraColumn);
+
+            return console
                 .CreateAnsiConsole()
                 .Progress()
                 .AutoClear(false)
                 .AutoRefresh(true)
                 .HideCompleted(false)
-                .Columns(
-                    new TaskDescriptionColumn { Alignment = Justify.Left },
-                    new PercentageColumn(),
-                    statsColumn
-                );
+                .Columns(columns.ToArray());
+        }
     }
 
     public static async ValueTask StartTaskAsync(

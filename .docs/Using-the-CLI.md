@@ -39,6 +39,7 @@ Type the following command in your terminal of choice, then press ENTER to run i
 | exportdm    | Exports all direct message channels                  |
 | exportguild | Exports all channels within the specified server     |
 | exportall   | Exports all accessible channels                      |
+| exportusers | Exports the member list of the specified server      |
 | channels    | Outputs the list of channels in the given server     |
 | dm          | Outputs the list of direct message channels          |
 | guilds      | Outputs the list of accessible servers               |
@@ -772,6 +773,128 @@ To exclude DMs, add the `--include-dm false` option.
 ```console
 ./DiscordChatExporter.Cli exportall -t "mfa.Ifrn" --include-dm false
 ```
+
+### Export the members of a server
+
+Everything else in this tool exports *messages*, and the people in those exports are described only
+as far as the messages needed. The `exportusers` command exports the server's roster instead: every
+member, whether or not they ever said anything.
+
+```console
+./DiscordChatExporter.Cli exportusers -t "mfa.Ifrn" -g 21814
+```
+
+> **Note**:
+> This command is specific to this fork, and it is JSON-only. It needs a **bot token** whose
+> application has the **Server Members Intent** enabled (Discord developer portal, under
+> Bot -> Privileged Gateway Intents). Discord does not hand the member list to user accounts over
+> the REST API at all. Without the intent the command stops with an explicit message rather than a
+> bare "forbidden".
+
+It is cheap: the roster comes 1000 members at a time, so a 5000-member server costs six requests.
+
+#### Members vs. users
+
+The two are not the same thing, and this document is the one place the distinction is drawn
+explicitly:
+
+- A **user** is a Discord account. Their username, global display name, avatar and banner look the
+  same in every server.
+- A **member** is that account's profile *inside one server*: their nickname, their roles, the
+  colour those roles give them, a server-specific avatar or banner, when they joined, and whether
+  they are boosting.
+
+A member has no identity of its own, which is why the entry is keyed by `userId` rather than by an
+ID of its own.
+
+Elsewhere in the export format the two are merged: the `author` of a message is a user object with
+the member's `nickname`, `color` and `roles` folded into it. Here they stay apart, so a null
+`avatarUrl` on a member means "wears their global avatar" rather than "has no avatar".
+
+#### Output
+
+By default the file is written to the working directory as `<server> [<id>] - Members.json`. The
+`-o|--output` option takes a file or a directory, and supports the `%g` (server ID), `%G` (server
+name), `%d` (current date) and `%%` tokens:
+
+```console
+./DiscordChatExporter.Cli exportusers -t "mfa.Ifrn" -g 21814 -o "C:\rosters\%G %d.json"
+```
+
+The document looks like this:
+
+```jsonc
+{
+  "mod": { "normal": false, "fullUsers": false },
+  "guild": { "id": "...", "name": "...", "roles": [ /* the server's whole role inventory */ ] },
+  "exportedAt": "...",
+  "members": [
+    {
+      "userId": "66155023779758080",
+      "nickname": "trackpadtimmy",      // server-specific; null when never set
+      "displayName": "trackpadtimmy",   // what a client renders: nickname, else the user's own
+      "color": "#D7342A",               // from the highest-positioned role that has one
+      "avatarUrl": null,                // server-specific override only
+      "bannerUrl": null,                // server-specific override only
+      "joinedAt": "2017-10-19T04:11:02.439+02:00",
+      "premiumSince": null,             // set only while boosting
+      "isPending": false,               // has not passed membership screening yet
+      "flags": ["DidRejoin"],
+      "roles": [ /* highest first, @everyone excluded, as Discord sends it */ ],
+      "user": {
+        "id": "66155023779758080",
+        "name": "m.tthew",
+        "discriminator": "0000",
+        "displayName": "matthew",
+        "isBot": false,
+        "avatarUrl": "https://cdn.discordapp.com/avatars/...",
+        "bannerUrl": null
+      }
+    }
+  ],
+  "memberCount": 5215
+}
+```
+
+`guild.approximateMemberCount` is Discord's own estimate and `memberCount` is what was actually
+written. The two disagreeing by a few is normal and does not mean the export was truncated.
+
+Avatar and banner hashes are resolved to CDN URLs the same way as everywhere else: an `a_` prefix
+means the asset is animated and gets a `.gif` URL, and the server-specific one takes precedence
+over the global one when both exist. Unlike a channel export, these are always real CDN links --
+there is no `--media` option here, so nothing is downloaded.
+
+#### Normalizing the output
+
+`--normal` works as it does for a channel export: users and roles move into lookup tables at the
+root, and the members reference them by ID.
+
+```console
+./DiscordChatExporter.Cli exportusers -t "mfa.Ifrn" -g 21814 --normal
+```
+
+Each member has `roleIds` instead of `roles` and drops the nested `user` for the root `users`
+table. Every member has exactly one user, so this deduplicates nothing there -- the saving is in
+the roles, which would otherwise be repeated in full for every member wearing them.
+
+#### Resolving full user profiles
+
+The user object nested in a roster entry is a **partial** one. Discord sends `banner` as null on it
+whether or not the account has one, so without help every `user.bannerUrl` in the document comes
+out null. Only a dedicated per-user fetch carries the real value, which is what `--full-users` does:
+
+```console
+./DiscordChatExporter.Cli exportusers -t "mfa.Ifrn" -g 21814 --full-users
+```
+
+This costs **one extra request per member**, turning a six-request export into a five-thousand-
+request one, which is why it is opt-in. Measured against a 5215-member server, it settles at about
+one member per second, so budget roughly an hour and a half; `--respect-rate-limits false` trades
+politeness for speed. `mod.fullUsers` records which way the document was produced, so a consumer
+can tell "this user has no banner" from "nobody asked".
+
+Server-specific member banners are unaffected: those come from the member object and are always
+present.
 
 ### List channels in a server
 

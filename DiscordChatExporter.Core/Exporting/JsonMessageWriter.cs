@@ -12,6 +12,7 @@ using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Discord.Data.Embeds;
 using DiscordChatExporter.Core.Markdown.Parsing;
+using DiscordChatExporter.Core.Utils;
 using JsonExtensions.Writing;
 using PowerKit.Extensions;
 
@@ -193,27 +194,9 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         await _writer.FlushAsync(cancellationToken);
     }
 
-    // A [Flags] enum's own ToString collapses to the raw number as soon as one bit is unknown,
-    // which would hide the flags that *are* recognized. This keeps both.
+    // Shared with the member export, which writes the same flag arrays
     private static IEnumerable<string> GetFlagNames<T>(T flags)
-        where T : struct, Enum
-    {
-        var remaining = Convert.ToInt32(flags, CultureInfo.InvariantCulture);
-
-        foreach (var value in Enum.GetValues<T>())
-        {
-            var bit = Convert.ToInt32(value, CultureInfo.InvariantCulture);
-
-            if (bit == 0 || (remaining & bit) == 0)
-                continue;
-
-            remaining &= ~bit;
-            yield return value.ToString();
-        }
-
-        if (remaining != 0)
-            yield return remaining.ToString(CultureInfo.InvariantCulture);
-    }
+        where T : struct, Enum => EnumUtils.GetFlagNames(flags);
 
     private static string ToCamelCase(string name)
     {

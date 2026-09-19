@@ -209,6 +209,26 @@ public class DiscordClient(
         );
     }
 
+    private async ValueTask EnsureGuildMembersIntentAsync(
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (await ResolveTokenKindAsync(cancellationToken) != TokenKind.Bot)
+            return;
+
+        var application = await GetApplicationAsync(cancellationToken);
+        if (application.IsGuildMembersIntentEnabled)
+            return;
+
+        throw new DiscordChatExporterException(
+            "Provided bot account is missing the GUILD_MEMBERS privileged intent, "
+                + "which is required to list the members of a server. "
+                + "It can be enabled in the Discord developer portal, "
+                + "under Bot -> Privileged Gateway Intents -> Server Members Intent.",
+            true
+        );
+    }
+
     public async ValueTask<User?> TryGetUserAsync(
         Snowflake userId,
         CancellationToken cancellationToken = default
@@ -353,6 +373,64 @@ public class DiscordClient(
         var response = await GetJsonResponseAsync($"guilds/{guildId}/roles", cancellationToken);
         foreach (var roleJson in response.EnumerateArray())
             yield return Role.Parse(roleJson);
+    }
+
+    // Walks the entire roster, as opposed to resolving members one at a time the way an
+    // export does. Requires a bot token carrying the GUILD_MEMBERS privileged intent: Discord
+    // does not hand the member list to user accounts over the REST API.
+    public async IAsyncEnumerable<Member> GetGuildMembersAsync(
+        Snowflake guildId,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default
+    )
+    {
+        if (guildId == Guild.DirectMessages.Id)
+            yield break;
+
+        await EnsureGuildMembersIntentAsync(cancellationToken);
+
+        // Hard cap imposed by the endpoint
+        const int pageSize = 1000;
+
+        // This endpoint pages by user ID instead of by offset, so each page resumes from the
+        // highest ID the previous one returned
+        var currentAfter = Snowflake.Zero;
+
+        while (true)
+        {
+            var url = new UrlBuilder()
+                .SetPath($"guilds/{guildId}/members")
+                .SetQueryParameter("limit", pageSize.ToString(CultureInfo.InvariantCulture))
+                .SetQueryParameter("after", currentAfter.ToString())
+                .Build();
+
+            var response = await GetJsonResponseAsync(url, cancellationToken);
+
+            var previousAfter = currentAfter;
+            var count = 0;
+
+            foreach (var memberJson in response.EnumerateArray())
+            {
+                var member = Member.Parse(memberJson, guildId);
+                yield return member;
+
+                // Discord returns these sorted by ID, but the cursor is tracked by maximum
+                // rather than by last seen, so that it holds either way
+                if (member.Id > currentAfter)
+                    currentAfter = member.Id;
+
+                count++;
+            }
+
+            // A short page means the roster is exhausted, which saves the empty request that
+            // paging until a zero-length response would otherwise cost
+            if (count < pageSize)
+                yield break;
+
+            // Guard against a full page that somehow carries nothing past the cursor, which
+            // would have us request the very same page forever
+            if (currentAfter == previousAfter)
+                yield break;
+        }
     }
 
     // Exposes the raw payload so that it can be persisted verbatim by a cache, which keeps

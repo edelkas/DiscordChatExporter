@@ -10,6 +10,12 @@ public partial record Application(Snowflake Id, string Name, ApplicationFlags Fl
     public bool IsMessageContentIntentEnabled { get; } =
         Flags.HasFlag(ApplicationFlags.GatewayMessageContent)
         || Flags.HasFlag(ApplicationFlags.GatewayMessageContentLimited);
+
+    // Required to walk the member list. The 'Limited' variant is what an unverified bot gets,
+    // and it grants the same access, so either one will do.
+    public bool IsGuildMembersIntentEnabled { get; } =
+        Flags.HasFlag(ApplicationFlags.GatewayGuildMembers)
+        || Flags.HasFlag(ApplicationFlags.GatewayGuildMembersLimited);
 }
 
 public partial record Application
