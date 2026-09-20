@@ -135,6 +135,13 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
         _writer.WriteString("nickname", member?.DisplayName ?? user.DisplayName);
 
+        // The account-wide display name, which this shape otherwise loses: 'nickname' above has
+        // already collapsed nickname -> display name -> username into one string, and there is no
+        // way to tell the three apart afterwards. Written here rather than with the other extended
+        // fields, because next to the name it resolves is where it makes sense to read it.
+        if (_isExtended)
+            _writer.WriteString("displayName", user.DisplayName);
+
         _writer.WriteString("color", Context.TryGetUserColor(user.Id)?.ToHexString());
         _writer.WriteBoolean("isBot", user.IsBot);
 

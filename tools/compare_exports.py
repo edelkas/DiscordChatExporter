@@ -236,6 +236,9 @@ def merge_person(user: dict, member: dict | None, extended: bool) -> dict:
     }
 
     if extended:
+        # The merged writer grew this field so that the global display name survives the
+        # collapse into "nickname"; it comes from the user either way
+        out["displayName"] = user["displayName"]
         out["joinedAt"] = member["joinedAt"] if member else None
         out["premiumSince"] = member["premiumSince"] if member else None
         out["isPending"] = member["isPending"] if member else False

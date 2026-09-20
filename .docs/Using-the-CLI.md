@@ -537,16 +537,21 @@ has always been a merge of Discord's *user* and *guild member* objects — that 
 
 | Property | Type | Meaning |
 | --- | --- | --- |
+| `displayName` | string | Their account-wide display name, with no nickname mixed in |
 | `joinedAt` | timestamp or `null` | When the member joined the server |
 | `premiumSince` | timestamp or `null` | When they started boosting the server; `null` if they aren't |
 | `isPending` | boolean | Whether they still have to pass the server's membership screening |
 | `flags` | array of strings | Guild member flags that are set (see below) |
 | `bannerUrl` | string or `null` | Their profile banner |
 
-All of these except `bannerUrl` are guild-scoped, so they are `null` (or `false`, or an empty array)
-for anyone who isn't a member of the server. In practice that means users who left, and users seen
-only as reaction authors — those are never resolved as members, so nothing about their membership is
-known. The export does not invent values for them.
+`displayName` is worth singling out, because `nickname` above has already collapsed nickname ->
+display name -> username into one string and there is no way to tell the three apart afterwards.
+This is the same field the `exportusers` roster and `--split-users` put on the user object.
+
+All of these except `displayName` and `bannerUrl` are guild-scoped, so they are `null` (or
+`false`, or an empty array) for anyone who isn't a member of the server. In practice that means
+users who left, and users seen only as reaction authors — those are never resolved as members, so
+nothing about their membership is known. The export does not invent values for them.
 
 `flags` is written as an array of names rather than the raw bitfield, so that a reader doesn't need
 to know the bit values:
