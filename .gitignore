@@ -11,3 +11,5 @@ obj/
 
 # Test results
 TestResults/
+
+dce2sql/

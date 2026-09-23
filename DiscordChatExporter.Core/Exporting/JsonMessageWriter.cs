@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Discord.Data.Embeds;
+using DiscordChatExporter.Core.Markdown;
 using DiscordChatExporter.Core.Markdown.Parsing;
 using DiscordChatExporter.Core.Utils;
 using JsonExtensions.Writing;
@@ -55,6 +56,10 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
     // progresses, so deferring gives every entry the richest data the export ever saw.
     private readonly Dictionary<Snowflake, User> _users = [];
     private readonly Dictionary<Snowflake, Role> _roles = [];
+
+    // Only the channels a message mentions, not every channel in the guild: this is the
+    // counterpart of the 'mentions' table, not an inventory.
+    private readonly Dictionary<Snowflake, Channel> _channels = [];
     private readonly Dictionary<Snowflake, Sticker> _stickers = [];
     private readonly Dictionary<string, Emoji> _emojis = new(StringComparer.Ordinal);
     private readonly Dictionary<Emoji, string> _emojiKeys = [];
@@ -73,6 +78,12 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         // are resolved from the context at render time rather than from the instance stored here.
         _users.TryAdd(user.Id, user);
         return user.Id.ToString();
+    }
+
+    private string RegisterChannel(Channel channel)
+    {
+        _channels.TryAdd(channel.Id, channel);
+        return channel.Id.ToString();
     }
 
     private string RegisterSticker(Sticker sticker)
@@ -470,6 +481,127 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         );
 
         _writer.WriteEndObject();
+        await _writer.FlushAsync(cancellationToken);
+    }
+
+    // The identity of a channel, and nothing else: a mention is a reference, so the topic and
+    // the thread state that the exported channel's own object carries have no business here.
+    private async ValueTask WriteMentionedChannelAsync(
+        Snowflake id,
+        Channel? channel,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteStartObject();
+
+        // Always written, even for a channel that could not be resolved: the ID is the half of
+        // a mention that cannot be recovered any other way, and a deleted channel still had one
+        _writer.WriteString("id", id.ToString());
+        _writer.WriteString("type", channel?.Kind.ToString());
+        _writer.WriteString("categoryId", channel?.Parent?.Id.ToString());
+        _writer.WriteString("category", channel?.Parent?.Name);
+        _writer.WriteString("name", channel?.Name);
+
+        _writer.WriteEndObject();
+        await _writer.FlushAsync(cancellationToken);
+    }
+
+    private async ValueTask WriteMentionedRoleAsync(
+        Snowflake id,
+        Role? role,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteStartObject();
+
+        _writer.WriteString("id", id.ToString());
+        _writer.WriteString("name", role?.Name);
+        _writer.WriteString("color", role?.Color?.ToHexString());
+        _writer.WriteNumber("position", role?.Position);
+
+        _writer.WriteEndObject();
+        await _writer.FlushAsync(cancellationToken);
+    }
+
+    // Every channel and role the body mentions, in the order they appear and without repeats.
+    // The message payload names the users a message mentions but not these, so they are read
+    // out of the body itself -- the same way inline emoji are, and for the same reason: it is
+    // the one place every mention is always written down.
+    //
+    // Note this reads 'message.Content', which is the raw body whatever '--markdown' is set to,
+    // so the two arrays say the same thing either way.
+    private async ValueTask WriteMentionTargetsAsync(
+        Message message,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var mentions = MarkdownParser.ExtractMentions(message.Content);
+
+        var channelIds = mentions
+            .Where(m => m.Kind == MentionKind.Channel)
+            .Select(m => m.TargetId)
+            .WhereNotNull()
+            .Distinct()
+            .ToArray();
+
+        var roleIds = mentions
+            .Where(m => m.Kind == MentionKind.Role)
+            .Select(m => m.TargetId)
+            .WhereNotNull()
+            .Distinct()
+            .ToArray();
+
+        // Channels
+        if (_isNormalized)
+            _writer.WriteStartArray("channelMentionIds");
+        else
+            _writer.WriteStartArray("channelMentions");
+
+        foreach (var id in channelIds)
+        {
+            // A mention may point at a thread that was never preloaded, so it is resolved on
+            // demand exactly as the markdown visitor does it
+            await Context.PopulateChannelAsync(id, cancellationToken);
+            var channel = Context.TryGetChannel(id);
+
+            if (_isNormalized)
+            {
+                _writer.WriteStringValue(
+                    channel is not null ? RegisterChannel(channel) : id.ToString()
+                );
+            }
+            else
+            {
+                await WriteMentionedChannelAsync(id, channel, cancellationToken);
+            }
+        }
+
+        _writer.WriteEndArray();
+
+        // Roles
+        if (_isNormalized)
+            _writer.WriteStartArray("roleMentionIds");
+        else
+            _writer.WriteStartArray("roleMentions");
+
+        foreach (var id in roleIds)
+        {
+            var role = Context.TryGetRole(id);
+
+            if (_isNormalized)
+            {
+                if (role is not null)
+                    _roles.TryAdd(role.Id, role);
+
+                _writer.WriteStringValue(id.ToString());
+            }
+            else
+            {
+                await WriteMentionedRoleAsync(id, role, cancellationToken);
+            }
+        }
+
+        _writer.WriteEndArray();
         await _writer.FlushAsync(cancellationToken);
     }
 
@@ -898,6 +1030,12 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteBoolean("reactionUsers", _shouldFetchReactionUsers);
         // Provenance: member data in this export may be up to the cache TTL old
         _writer.WriteBoolean("cache", Context.Request.IsCacheEnabled);
+        // Not a fork option, but the one thing about a message body a consumer most needs to
+        // know: false means mentions, custom emoji and timestamps are still in their raw
+        // '<@123>' form, true means they have been resolved against names that can change
+        // afterwards -- so the same message re-exported later can differ without having been
+        // edited. See 'Keeping message content stable' in the docs.
+        _writer.WriteBoolean("markdown", Context.Request.ShouldFormatMarkdown);
         _writer.WriteEndObject();
 
         // Guild
@@ -1104,6 +1242,10 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             _writer.WriteEndArray();
         }
 
+        // Channels and roles the message mentions, which the original schema records nowhere
+        if (_isExtended)
+            await WriteMentionTargetsAsync(message, cancellationToken);
+
         // Message reference
         if (message.Reference is not null)
         {
@@ -1271,6 +1413,18 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             await WriteStickerAsync(sticker, cancellationToken);
 
         _writer.WriteEndArray();
+
+        // Channels. Only the ones some message mentions, so the table is empty unless
+        // '--extended' filled it; the channel being exported has its own object at the root.
+        if (_channels.Count > 0)
+        {
+            _writer.WriteStartArray("channels");
+
+            foreach (var channel in _channels.Values.OrderBy(c => c.Id.Value))
+                await WriteMentionedChannelAsync(channel.Id, channel, cancellationToken);
+
+            _writer.WriteEndArray();
+        }
     }
 
     public override async ValueTask WritePostambleAsync(

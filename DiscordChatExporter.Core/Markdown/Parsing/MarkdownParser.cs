@@ -480,6 +480,13 @@ internal static partial class MarkdownParser
     public static IReadOnlyList<EmojiNode> ExtractEmojis(string markdown) =>
         Extract<EmojiNode>(markdown);
 
+    // Discord's message payload names the users a message mentions, but not the channels or
+    // roles: 'mention_channels' is only populated for crossposted messages, and 'mention_roles'
+    // omits a role that was mentioned without being pingable. The body is the one place every
+    // mention is always written down, so that is where these come from.
+    public static IReadOnlyList<MentionNode> ExtractMentions(string markdown) =>
+        Extract<MentionNode>(markdown);
+
     private static IReadOnlyList<MarkdownNode> Parse(
         MarkdownContext context,
         StringSegment segment

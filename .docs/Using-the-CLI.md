@@ -364,6 +364,8 @@ replaced by references:
 | ---------------------------- | --------------------------------- | ------------------- |
 | `message.author`             | `message.authorId`                | `users`             |
 | `message.mentions`           | `message.mentionIds`              | `users`             |
+| `message.channelMentions`    | `message.channelMentionIds`       | `channels`          |
+| `message.roleMentions`       | `message.roleMentionIds`          | `roles`             |
 | `message.stickers`           | `message.stickerIds`              | `stickers`          |
 | `message.inlineEmojis`       | `message.inlineEmojiKeys`         | `emojis`            |
 | `message.reactions[].emoji`  | `message.reactions[].emojiKey`    | `emojis`            |
@@ -372,8 +374,12 @@ replaced by references:
 | `embed.inlineEmojis`         | `embed.inlineEmojiKeys`           | `emojis`            |
 | `user.roles`                 | `user.roleIds`                    | `roles`             |
 
-and four lookup tables are added to the root of the document: `users`, `roles`, `emojis`, and
-`stickers`. Entries are sorted, so the output is stable across runs.
+and lookup tables are added to the root of the document: `users`, `roles`, `emojis` and `stickers`,
+plus `members` under `--split-users` and `channels` when `--extended` found a channel mention to put
+in it. Entries are sorted, so the output is stable across runs.
+
+The `channels` table holds only the channels some message *mentions*. The channel the export covers
+has its own object at the root and is not repeated there.
 
 Attachments are deliberately left inline. An attachment belongs to exactly one message, so unlike
 the entities above it is never actually duplicated, and normalizing it would only add indirection.
@@ -527,6 +533,58 @@ points at an arbitrary website rather than at a downloadable asset.
 
 Forwarded messages carry their own component tree, so `forwardedMessage` gains a `components` array
 on the same terms.
+
+##### Mentioned channels and roles
+
+The original schema records the users a message mentions, in `mentions`, and nothing about the
+channels or roles it mentions. `--extended` adds the other two, on the same terms:
+
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `channelMentions` | array of objects | The channels this message mentions |
+| `roleMentions` | array of objects | The roles this message mentions |
+
+A mentioned channel carries its identity and nothing else — a mention is a reference, so the topic
+and thread state that the exported channel's own object holds have no business here:
+
+```json
+{
+  "channelMentions": [
+    {
+      "id": "218819289266913281",
+      "type": "GuildTextChat",
+      "categoryId": "449367495544143892",
+      "category": "Support",
+      "name": "support"
+    }
+  ],
+  "roleMentions": [
+    { "id": "198374136001593344", "name": "Moderator", "color": "#E67E22", "position": 51 }
+  ]
+}
+```
+
+Both are read out of the message body, the same way `inlineEmojis` is, because Discord's payload
+does not carry them: `mention_channels` is only populated for crossposted messages, and
+`mention_roles` omits a role mentioned without being pingable. The body is the one place every
+mention is always written down. It is read *raw*, so the two arrays say the same thing whether or
+not `--markdown` resolved the body into names.
+
+The `id` is always written, even for a channel or role that no longer exists and could not be
+resolved; the other fields are then null. An ID is the half of a mention that cannot be recovered
+any other way.
+
+Under `--normal` these become `channelMentionIds` and `roleMentionIds`, referring to the root
+`channels` and `roles` tables. Note that an ID which could not be resolved still appears in the
+reference array while having no entry in the table: a deleted channel leaves nothing to put there
+but the ID, and dropping the reference to keep the tables tidy would lose it. This is the one place
+in a normalized document where a reference may not resolve.
+
+Together with [Keeping message content stable](#keeping-message-content-stable) this makes a
+message's mentions fully recoverable. With `--markdown false` the body keeps `<#218819289266913281>`
+and these arrays say what that channel was called at the time — so a consumer can render the
+mention without having to resolve anything itself, and without the body changing when somebody
+renames the channel later.
 
 ##### Users
 
@@ -766,7 +824,8 @@ records which of its modifications are in effect, so that parsers can adapt with
     "extended": true,
     "splitUsers": false,
     "reactionUsers": false,
-    "cache": false
+    "cache": false,
+    "markdown": true
   }
 }
 ```
@@ -777,10 +836,48 @@ guild-member objects are written separately instead of merged, `reactionUsers` w
 behind each reaction were fetched, and `cache` whether member data may have been served from a cache
 rather than fetched during this export.
 
+`markdown` is the odd one out, being a vanilla option rather than a modification, and it is here
+because it is the thing about a message body a consumer most needs to know. See
+[Keeping message content stable](#keeping-message-content-stable).
+
 With `normal`, `extended` and `splitUsers` all false, the document matches the schema of a vanilla
 DiscordChatExporter export, apart from the presence of this `mod` object itself.
 
 An export produced by upstream DiscordChatExporter has no `mod` property at all.
+
+#### Keeping message content stable
+
+`--markdown` is on by default, and it does rather more to a message body than the name suggests.
+For the JSON format it resolves exactly three things, and leaves everything else alone:
+
+| In the message | Written as |
+| --- | --- |
+| `<@197765375503368192>` | `@Nickname` |
+| `<#449367560878686208>` | `#channel-name`, plus ` [voice]` for a voice channel |
+| `<@&198374136001593344>` | `@Role Name` |
+| `<:goldheart:711809267547766806>` | `:goldheart:` |
+| `<t:1735689600:R>` | a date, formatted per `--locale` |
+
+Every one of those is resolved against something that can change later. Rename a channel, change a
+nickname, export the same conversation again, and the message body comes out different although
+nobody edited anything. For a one-off export that is merely cosmetic. For an archive kept up to
+date by re-exporting, it is worse than cosmetic: a consumer diffing old against new sees hundreds
+of messages that appear to have been edited, and cannot tell those from the handful that really
+were.
+
+So for anything being archived rather than read, export with markdown off:
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 21814 -f Json --markdown false
+```
+
+The bodies then keep their raw form, which is both stable forever and strictly more informative --
+`<:goldheart:711809267547766806>` names the emoji *and* identifies it, where `:goldheart:` only
+names it. The `mod` object records which way the export was made, so a consumer never has to guess.
+
+Note that this only concerns what is written into `content`. The structured fields are unaffected:
+`mentions` still lists the users a message mentions, `inlineEmojis` is still extracted, and both are
+built from the raw message either way.
 
 ### Export channels from a specific server
 
